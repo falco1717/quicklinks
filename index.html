@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QuickLinks</title>
+    <link rel="stylesheet" href="styles.css?v=2026.08.10.001">
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="brand-block brand-home" href="/" aria-label="Go to General homepage">
+        <img id="brandLogo" class="brand-logo" src="assets/quicklinks-logo.png" alt="QuickLinks">
+        <div>
+          <p id="companyName" class="eyebrow">QuickLinks</p>
+          <h1 id="departmentTitle">Link Portal</h1>
+        </div>
+      </a>
+
+      <div class="controls" aria-label="Homepage controls">
+        <label class="field">
+          <span>Location</span>
+          <select id="locationSelect"></select>
+        </label>
+        <label class="field search-field">
+          <span>Search</span>
+          <input id="searchInput" type="search" placeholder="Filter links" autocomplete="off">
+        </label>
+        <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch theme">
+          <span class="theme-icon" aria-hidden="true">◐</span>
+          <span id="themeLabel">Dark mode</span>
+        </button>
+        <a class="admin-link" href="admin.html">Admin</a>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section class="section-heading" aria-labelledby="viewTitle">
+        <div>
+          <p id="viewMeta" class="eyebrow">General</p>
+          <h2 id="viewTitle">Daily links</h2>
+        </div>
+        <p id="resultCount" class="result-count"></p>
+      </section>
+
+      <div id="content" class="content-grid" aria-live="polite"></div>
+    </main>
+
+    <footer id="productNotice" class="app-footer">QuickLinks · Created by Jordan Farmer</footer>
+    <script src="app.js?v=2026.08.10.001"></script>
+  </body>
+</html>

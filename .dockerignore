@@ -1,0 +1,12 @@
+.git
+.github
+.codex
+.env
+example.env
+.image-extract
+__pycache__
+data
+docs
+scripts
+tests
+*.pyc

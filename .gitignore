@@ -1,0 +1,20 @@
+# new-project-setup:v6:start
+# Machine-local private documentation
+*.local.md
+.github-backup.local.json
+
+# Generated dependencies and artifacts
+node_modules/
+dist/
+build/
+out/
+.next/
+coverage/
+test-artifacts/
+playwright-report/
+.env
+data/
+.image-extract/
+__pycache__/
+*.pyc
+# new-project-setup:v6:end

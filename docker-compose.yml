@@ -1,0 +1,13 @@
+services:
+  quicklinks:
+    image: jordanmfarmer/quicklinks:latest
+    container_name: quicklinks
+    restart: unless-stopped
+    ports:
+      - "${PORT:-6969}:6969"
+    environment:
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+    volumes:
+      - ./data:/app/data

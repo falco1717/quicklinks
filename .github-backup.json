@@ -1,0 +1,24 @@
+{
+  "repository": "falco1717/quicklinks",
+  "exclude": [],
+  "allow_findings": [
+    {
+      "rule": "credential-assignment",
+      "path": "docker-compose.yml",
+      "sha256": "b1a7eb47f7ba3f06e77fab3b09969859e9806a481904e95c7614fe153f41cf55"
+    }
+  ],
+  "allow_binary": [
+    {
+      "rule": "binary-file",
+      "path": "assets/quicklinks-logo-dark.png",
+      "sha256": "82bff4eac691dc0dfa261fbe451512454ad69e95c08c956eb6458b2713688792"
+    },
+    {
+      "rule": "binary-file",
+      "path": "assets/quicklinks-logo.png",
+      "sha256": "efeabde8431fc91f01f257e49ab447a742fe692993544b5629de6cf2aff72a5d"
+    }
+  ],
+  "confidential_patterns": []
+}

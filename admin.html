@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QuickLinks Admin</title>
+    <link rel="stylesheet" href="styles.css?v=2026.08.10.001">
+    <link rel="stylesheet" href="admin.css?v=2026.08.10.001">
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="brand-block brand-home" href="/" aria-label="Go to General homepage">
+        <img id="adminBrandLogo" class="brand-logo" src="assets/quicklinks-logo.png" alt="QuickLinks">
+        <div>
+          <p id="adminCompanyName" class="eyebrow">QuickLinks</p>
+          <h1 id="adminBrandTitle">Admin Center</h1>
+        </div>
+      </a>
+
+      <div class="admin-actions">
+        <a class="admin-link" href="/">Homepage</a>
+        <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch theme">
+          <span class="theme-icon" aria-hidden="true">◐</span>
+          <span id="themeLabel">Dark mode</span>
+        </button>
+        <button id="logoutButton" class="theme-toggle hidden" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main class="page-shell admin-shell">
+      <section id="setupPanel" class="admin-panel hidden">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">First launch</p>
+            <h2>Create your administrator</h2>
+          </div>
+        </div>
+        <p>No administrator credentials were supplied, so create the first local admin account.</p>
+        <form id="setupForm" class="admin-form compact-form">
+          <label class="field">
+            <span>Username</span>
+            <input id="setupUsername" type="text" autocomplete="username" required autofocus>
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="setupPassword" type="password" minlength="7" autocomplete="new-password" required>
+          </label>
+          <label class="field">
+            <span>Confirm password</span>
+            <input id="setupPasswordConfirm" type="password" minlength="7" autocomplete="new-password" required>
+          </label>
+          <button class="primary-button" type="submit">Create administrator</button>
+        </form>
+      </section>
+
+      <section id="loginPanel" class="admin-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Restricted</p>
+            <h2>Sign in</h2>
+          </div>
+        </div>
+        <form id="loginForm" class="admin-form compact-form">
+          <label class="field">
+            <span>Username</span>
+            <input id="usernameInput" type="text" autocomplete="off" required>
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="primary-button" type="submit">Sign in</button>
+        </form>
+      </section>
+
+      <section id="adminPanel" class="hidden">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Catalog</p>
+            <h2>Manage links</h2>
+          </div>
+          <p id="adminStatus" class="result-count"></p>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Admin sections">
+          <button class="tab-button active" type="button" data-tab="links">Links</button>
+          <button class="tab-button" type="button" data-tab="locations">Locations</button>
+          <button class="tab-button" type="button" data-tab="branding">Branding</button>
+          <button class="tab-button" type="button" data-tab="data">Import / Export</button>
+          <button class="tab-button" type="button" data-tab="authentication">Authentication</button>
+        </div>
+
+        <div id="adminLayout" class="admin-layout">
+          <aside id="adminSidebar" class="admin-panel side-panel">
+            <label class="field">
+              <span>Filter</span>
+              <input id="adminFilter" type="search" placeholder="Search admin list" autocomplete="off">
+            </label>
+
+            <div id="adminList" class="admin-list"></div>
+          </aside>
+
+          <section class="admin-panel editor-panel">
+            <div id="linksEditor">
+              <div class="editor-heading">
+                <h3 id="linkFormTitle">Add link</h3>
+                <button id="newLinkButton" class="secondary-button" type="button">New link</button>
+              </div>
+
+              <form id="linkForm" class="admin-form">
+                <input id="linkId" type="hidden">
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Page</span>
+                    <select id="pageType">
+                      <option value="general">General</option>
+                      <option value="location">Location</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Location</span>
+                    <select id="linkLocation"></select>
+                  </label>
+                  <label class="field">
+                    <span>Type</span>
+                    <select id="linkType">
+                      <option value="general">General</option>
+                      <option value="standard">Standard service</option>
+                      <option value="vhost">Vhost</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Sort order</span>
+                    <input id="linkSort" type="number" min="0" step="1" value="0">
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span>Name</span>
+                  <input id="linkName" type="text" required>
+                </label>
+                <label class="field">
+                  <span>URL</span>
+                  <input id="linkUrl" type="url" placeholder="https://service.example.com" required>
+                </label>
+                <label class="field">
+                  <span>Description</span>
+                  <textarea id="linkDescription" rows="3" placeholder="Short plain-language description"></textarea>
+                </label>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Group</span>
+                    <input id="linkGroup" type="text" required>
+                  </label>
+                  <label class="field">
+                    <span>Cluster</span>
+                    <input id="linkCluster" type="text" placeholder="Optional">
+                  </label>
+                  <label class="check-field">
+                    <input id="linkEnabled" type="checkbox" checked>
+                    <span>Visible on homepage</span>
+                  </label>
+                </div>
+
+                <div class="button-row">
+                  <button class="primary-button" type="submit">Save link</button>
+                  <button id="deleteLinkButton" class="danger-button" type="button">Delete link</button>
+                </div>
+              </form>
+            </div>
+
+            <div id="locationsEditor" class="hidden">
+              <div class="editor-heading">
+                <h3 id="locationFormTitle">Add location</h3>
+                <button id="newLocationButton" class="secondary-button" type="button">New location</button>
+              </div>
+
+              <form id="locationForm" class="admin-form">
+                <input id="locationId" type="hidden">
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Name</span>
+                    <input id="locationName" type="text" required>
+                  </label>
+                  <label class="field">
+                    <span>Code</span>
+                    <input id="locationCode" type="text" required>
+                  </label>
+                  <label class="field">
+                    <span>Sort order</span>
+                    <input id="locationSort" type="number" min="0" step="1" value="0">
+                  </label>
+                  <label class="check-field">
+                    <input id="locationEnabled" type="checkbox" checked>
+                    <span>Show in dropdown</span>
+                  </label>
+                </div>
+
+                <div class="button-row">
+                  <button class="primary-button" type="submit">Save location</button>
+                  <button id="deleteLocationButton" class="danger-button" type="button">Delete location</button>
+                </div>
+              </form>
+            </div>
+
+            <div id="brandingEditor" class="hidden">
+              <div class="editor-heading">
+                <h3>Site branding</h3>
+              </div>
+              <form id="brandingForm" class="admin-form">
+                <div class="branding-preview">
+                  <img id="brandingPreview" src="assets/quicklinks-logo.png" alt="Current site logo">
+                </div>
+                <label class="field">
+                  <span>Company name</span>
+                  <input id="brandingCompanyName" type="text" required>
+                </label>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Homepage department title</span>
+                    <input id="brandingDepartmentTitle" type="text" required>
+                  </label>
+                  <label class="field">
+                    <span>Admin department title</span>
+                    <input id="brandingAdminTitle" type="text" required>
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Company logo</span>
+                  <input id="brandingLogo" type="file" accept="image/png,image/jpeg,image/webp">
+                </label>
+                <label class="check-field">
+                  <input id="removeBrandingLogo" type="checkbox">
+                  <span>Restore the default QuickLinks logo</span>
+                </label>
+                <p class="field-help">PNG, JPG, or WebP, up to 5 MB.</p>
+                <div class="button-row">
+                  <button class="primary-button" type="submit">Save branding</button>
+                </div>
+              </form>
+            </div>
+
+            <div id="dataEditor" class="hidden">
+              <div class="editor-heading">
+                <h3>Bulk import and export</h3>
+              </div>
+              <div class="admin-form">
+                <section class="tool-section">
+                  <h4>Download</h4>
+                  <p class="field-help">Export the current catalog for backup or download a ready-to-fill template.</p>
+                  <div class="button-row left-buttons">
+                    <a class="secondary-button" href="/api/export.csv">Export current catalog</a>
+                    <a class="secondary-button" href="/api/import-template.csv">Download CSV template</a>
+                  </div>
+                </section>
+                <section class="tool-section">
+                  <h4>Import CSV</h4>
+                  <label class="field">
+                    <span>CSV file</span>
+                    <input id="importFile" type="file" accept=".csv,text/csv">
+                  </label>
+                  <label class="field">
+                    <span>Import mode</span>
+                    <select id="importMode">
+                      <option value="merge">Merge and update matching records</option>
+                      <option value="replace">Replace all links and locations</option>
+                    </select>
+                  </label>
+                  <p class="field-help">Merge matches locations by code and links by page, location, and name. Replace removes the existing catalog first.</p>
+                  <button id="importButton" class="primary-button" type="button">Import CSV</button>
+                  <p id="importResult" class="result-count"></p>
+                </section>
+              </div>
+            </div>
+
+            <div id="authenticationEditor" class="hidden">
+              <div class="editor-heading">
+                <h3>Authentication</h3>
+              </div>
+              <div class="auth-grid">
+                <section class="tool-section">
+                  <h4>Local administrators</h4>
+                  <div id="localUserList" class="admin-list compact-list"></div>
+                  <form id="localUserForm" class="admin-form">
+                    <input id="localUserId" type="hidden">
+                    <label class="field">
+                      <span>Username</span>
+                      <input id="localUsername" type="text" autocomplete="off" required>
+                    </label>
+                    <label class="field">
+                      <span>Password</span>
+                      <input id="localPassword" type="password" minlength="7" autocomplete="new-password">
+                    </label>
+                    <p class="field-help">At least 10 characters. Leave blank when editing to keep the current password.</p>
+                    <label class="check-field">
+                      <input id="localUserEnabled" type="checkbox" checked>
+                      <span>Account enabled</span>
+                    </label>
+                    <div class="button-row">
+                      <button class="primary-button" type="submit">Save local user</button>
+                      <button id="newLocalUserButton" class="secondary-button" type="button">New user</button>
+                      <button id="deleteLocalUserButton" class="danger-button" type="button">Delete</button>
+                    </div>
+                  </form>
+                </section>
+
+                <section class="tool-section">
+                  <h4>Active Directory</h4>
+                  <form id="adForm" class="admin-form">
+                    <div class="guidance-box">
+                      <strong>How to fill this out</strong>
+                      <p>Enter your AD DNS domain. The domain controller is optional and will be discovered automatically when left blank.</p>
+                      <p>Add usernames and groups one per line. Groups may use a group name, sAMAccountName, SID, or distinguished name.</p>
+                    </div>
+                    <label class="check-field">
+                      <input id="adEnabled" type="checkbox">
+                      <span>Allow Active Directory login</span>
+                    </label>
+                    <label class="field">
+                      <span>AD domain</span>
+                      <input id="adDomain" type="text" placeholder="example.com">
+                    </label>
+                    <label class="field">
+                      <span>AD server</span>
+                      <input id="adServer" type="text" placeholder="Optional domain controller">
+                    </label>
+                    <div class="form-grid">
+                      <label class="field">
+                        <span>Admin users</span>
+                        <textarea id="adAdminUsers" rows="6" placeholder="one username per line"></textarea>
+                      </label>
+                      <label class="field">
+                        <span>Admin groups</span>
+                        <textarea id="adAdminGroups" rows="6" placeholder="one AD group name or SID per line"></textarea>
+                      </label>
+                    </div>
+                    <label class="check-field">
+                      <input id="adSsl" type="checkbox" checked>
+                      <span>Use LDAPS encryption</span>
+                    </label>
+                    <p class="field-help">Users authenticate directly against Active Directory. No Entra ID or service account is required.</p>
+                    <button class="primary-button" type="submit">Save AD settings</button>
+                  </form>
+                </section>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer id="productNotice" class="app-footer">QuickLinks · Created by Jordan Farmer</footer>
+    <script src="admin.js?v=2026.08.10.001"></script>
+  </body>
+</html>

@@ -1,0 +1,269 @@
+.admin-actions {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  justify-content: flex-end;
+}
+
+.primary-button,
+.secondary-button,
+.danger-button,
+.tab-button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 14px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.secondary-button:hover,
+.tab-button:hover {
+  background: var(--link-hover);
+}
+
+.primary-button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #10200d;
+}
+
+.danger-button {
+  border-color: #b84b4b;
+  color: #ffe8e8;
+  background: #8f2f2f;
+}
+
+:root:not([data-theme="dark"]) .danger-button {
+  color: #681f1f;
+  background: #fff3f3;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.admin-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.admin-panel {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.side-panel {
+  display: grid;
+  gap: 14px;
+  position: sticky;
+  top: 16px;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.admin-layout.tool-layout {
+  grid-template-columns: minmax(0, 1100px);
+}
+
+.tool-section {
+  display: grid;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.tool-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tool-section h4 {
+  margin: 0;
+}
+
+.left-buttons {
+  justify-content: flex-start;
+}
+
+.auth-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
+  gap: 24px;
+}
+
+.compact-list {
+  max-height: 220px;
+}
+
+.branding-preview {
+  display: flex;
+  min-height: 100px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--link-bg);
+}
+
+.branding-preview img {
+  display: block;
+  width: auto;
+  max-width: min(100%, 440px);
+  max-height: 90px;
+  object-fit: contain;
+}
+
+.field-help {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.guidance-box {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--link-bg);
+}
+
+.guidance-box p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.tab-button.active {
+  border-color: var(--accent);
+  background: var(--link-hover);
+}
+
+.admin-list {
+  display: grid;
+  gap: 8px;
+  max-height: 68vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.list-item {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: var(--link-bg);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.list-item:hover,
+.list-item.active {
+  border-color: var(--accent);
+  background: var(--link-hover);
+}
+
+.list-title {
+  font-weight: 800;
+}
+
+.list-meta {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.editor-heading,
+.button-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.admin-form {
+  display: grid;
+  gap: 14px;
+}
+
+.compact-form {
+  max-width: 460px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.check-field {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .admin-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .side-panel {
+    position: static;
+  }
+
+  .tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .auth-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .admin-actions,
+  .button-row,
+  .editor-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,4 @@
+record_type,name,code,page_type,location_code,link_type,url,description,group_name,cluster,sort_order,enabled
+location,Example Facility,ex,,,,,,,,10,1
+link,Example Service,,location,ex,standard,https://service.example.com,Short description shown on the card.,Standard Services,,10,1
+link,Example General Link,,general,,general,https://portal.example.com,Short description shown on the card.,Operations,,20,1
