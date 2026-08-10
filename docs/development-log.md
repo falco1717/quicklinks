@@ -10,3 +10,5 @@ Keep entries public-ready: completed work, decisions and rationale, useful faile
 - An initial handler method name collided with the Python HTTP server lifecycle. Container smoke testing caught it; the method was renamed and the complete container matrix then passed.
 - Verified five unit tests, clean byte compilation/diff checks, absence of prior insecure defaults, an isolated Docker build, browser-route redirect behavior, setup replay rejection, and environment-seeded login.
 - Reviewed and fingerprint-allowlisted the Compose environment-variable pass-through false positive and the two known product-logo PNG files. Allowances are file-content-specific and invalidate automatically if those files change.
+- Published an audited parentless baseline to the public `falco1717/quicklinks` repository, preserving prior local history under a hidden Codex legacy ref.
+- Published Docker Hub tags `2026.08.10.001` and `latest`; both were verified at registry digest `sha256:9799242362aa9e07d0d782068e800ea07530e14387f62b17258d7efed9639704`.
