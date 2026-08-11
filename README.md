@@ -22,7 +22,10 @@ Both variables must be supplied together. A partial pair stops startup with a cl
 
 ## Running without Docker
 
-QuickLinks is a standard-library Python application, so it runs directly under systemd with no packages installed. See [docs/running-without-docker.md](docs/running-without-docker.md).
+QuickLinks is a standard-library Python application, so it runs directly with no packages installed:
+
+- **Linux / systemd** — [docs/running-without-docker.md](docs/running-without-docker.md)
+- **Windows** — [docs/running-on-windows.md](docs/running-on-windows.md)
 
 ## Configuration
 

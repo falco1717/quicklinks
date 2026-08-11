@@ -2,7 +2,7 @@
 
 Yes. QuickLinks is a single Python file on the standard library — `http.server` and `sqlite3`, no web framework — so a bare install needs **no packages at all** unless you want on-premises Active Directory login. There is nothing to compile and no build step.
 
-This guide sets it up as a systemd service on Debian or Ubuntu. Adapt paths for other distributions.
+This guide sets it up as a systemd service on Debian or Ubuntu. Adapt paths for other distributions. For Windows, see [running-on-windows.md](running-on-windows.md).
 
 ## Requirements
 
