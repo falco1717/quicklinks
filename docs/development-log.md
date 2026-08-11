@@ -2,6 +2,12 @@
 
 Keep entries public-ready: completed work, decisions and rationale, useful failed approaches, validation, and durable lessons.
 
+## 2026-08-11 (data directory error message)
+
+- Fixed the diagnostic that cost the most time during the first deployment of `2026.08.11.002`. An unwritable data directory produced `sqlite3.OperationalError: attempt to write a readonly database` from `PRAGMA journal_mode = WAL`, naming neither the directory nor the user, and pointing at a database problem that did not exist. `ensure_database` now preflights the directory with a write probe and reports the path, the effective uid and gid, and the fix — including the specific cause that produced it: dropping all capabilities strips root's `CAP_DAC_OVERRIDE`, so a container running as root is still bound by the directory mode.
+- The remaining `PRAGMA` failure path is wrapped too, so anything the preflight cannot anticipate is still reported against the database path rather than as a bare pragma error.
+- The two permission tests skip on Windows, where the POSIX mode has no equivalent, and skip under root, which bypasses permission checks entirely. They were verified on Linux specifically because that is the only place they execute — a green Windows run proves nothing about them. A third test asserts the write probe leaves no file behind.
+
 ## 2026-08-11 (drop Saltbox and the ansible role)
 
 - Removed the Saltbox integration from the project: the README section, the `sb install sandbox-quicklinks` instructions, the pointer to the external Sandbox pull request, and the Saltbox framing in the handoff doc. The `ADMIN_USERNAME`/`ADMIN_PASSWORD` provisioning path those instructions relied on is a general feature and stays exactly as it was — only the Saltbox-specific packaging and wording are gone.
