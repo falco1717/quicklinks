@@ -2,6 +2,13 @@
 
 Keep entries public-ready: completed work, decisions and rationale, useful failed approaches, validation, and durable lessons.
 
+## 2026-08-11 (drop Saltbox and the ansible role)
+
+- Removed the Saltbox integration from the project: the README section, the `sb install sandbox-quicklinks` instructions, the pointer to the external Sandbox pull request, and the Saltbox framing in the handoff doc. The `ADMIN_USERNAME`/`ADMIN_PASSWORD` provisioning path those instructions relied on is a general feature and stays exactly as it was — only the Saltbox-specific packaging and wording are gone.
+- Left the historical changelog entry for `2026.08.10.001` in place but trimmed its trailing "including Saltbox installs" clause. Rewriting what a shipped release did would be dishonest; the remaining sentence is still accurate on its own.
+- Removed the ansible role that shipped in the July tree. It was never the deploy path for the running instance — ansible is not installed on the host and there was no inventory — but its role defaults rendered a compose file with no `networks:` block, and its playbook pinned host port 6969, which belongs to a different production app. Archived to the host's backup directory before deletion rather than dropped outright.
+- Corrected three README statements that went stale when Entra ID was added: the project summary listed only Active Directory, `LOG_LEVEL` mentioned only Active Directory errors, and the first-run security note said setup closes once Active Directory is enabled when it closes for either directory. The release example now derives the tag from `VERSION` so it cannot go stale again.
+
 ## 2026-08-11 (auth page rework)
 
 - Reworked the Authentication tab so the two directory providers stop rendering their full forms inline. Chose compact status rows plus a per-provider dialog over the toggle that was also suggested: a show-one-at-a-time toggle hides whether the *other* provider is enabled, which is exactly the fact an administrator opens that page to check. Rows keep both states visible and still collapse the tab from roughly 2,200px to 468px.

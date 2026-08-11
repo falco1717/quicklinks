@@ -1,6 +1,6 @@
 # QuickLinks
 
-QuickLinks is a clean, self-hosted link portal with a browser-based admin center. It supports custom branding, locations, grouped links, CSV import/export, local administrators, and optional Active Directory authentication.
+QuickLinks is a clean, self-hosted link portal with a browser-based admin center. It supports custom branding, locations, grouped links, CSV import/export, local administrators, and optional Active Directory or Microsoft Entra ID authentication.
 
 ## Quick start
 
@@ -32,7 +32,7 @@ Both variables must be supplied together. A partial pair stops startup with a cl
 | `PORT` | `6969` | HTTP listening port inside the container. |
 | `SESSION_COOKIE_SECURE` | `auto` | `auto` adds the `Secure` cookie flag when `X-Forwarded-Proto` is `https`. Force it with `1`, disable it with `0`. |
 | `TRUST_PROXY` | blank | Set to `1` behind a reverse proxy so login throttling uses the client address from `X-Forwarded-For` instead of the proxy's. |
-| `LOG_LEVEL` | `INFO` | Logging verbosity. Failed logins, throttled logins, and Active Directory errors are logged here. |
+| `LOG_LEVEL` | `INFO` | Logging verbosity. Failed logins, throttled logins, and directory errors are logged here. |
 
 Do not commit `.env`. Keep `data/` persistent and back it up; it contains the SQLite database, generated session secret, and uploaded branding.
 
@@ -68,19 +68,9 @@ The client secret is stored in the settings table of `links.db`. Keep the data d
 - **Sessions are bound to an identity and can be revoked.** The signed cookie names the account and its authentication source. Logging out, changing a password, renaming an account, disabling it, or deleting it invalidates every token already issued to it. Disabling a directory, or editing which users, groups, or roles it authorizes, invalidates that directory's sessions.
 - **Entra sign-ins are verified server-side.** State and nonce are carried in a short-lived signed cookie, the PKCE verifier never leaves the server, and the authorization code is redeemed over a TLS connection this process opens to `login.microsoftonline.com`. Tenant, audience, nonce, and validity window are all checked on the returned ID token. No token is ever accepted from the browser.
 - **Logins are rate limited.** Five failures for one username triggers a 15 minute lockout; thirty failures from one address triggers a 5 minute lockout. Lockouts answer `429` with a `Retry-After` header. The per-address limit is deliberately loose so a shared proxy address cannot lock out every administrator — set `TRUST_PROXY=1` to get real client addresses.
-- **The first-run page closes permanently.** It is available only while no login is possible at all. Once a local administrator exists *or* Active Directory is enabled, `POST /api/setup` is rejected, including after a restart with no local accounts left.
+- **The first-run page closes permanently.** It is available only while no login is possible at all. Once a local administrator exists *or* a directory (Active Directory or Microsoft Entra ID) is enabled, `POST /api/setup` is rejected, including after a restart with no local accounts left.
 - **Link URLs may not use script-bearing schemes.** `javascript:`, `data:`, `vbscript:`, `blob:`, `about:`, and `filesystem:` are rejected on both the admin form and CSV import. Ordinary schemes, intranet `host:port` forms, and `smb:`/`rdp:`/`mailto:` links are unaffected.
 - Request bodies are capped at 12 MB and rejected from the `Content-Length` header, before any of the body is read.
-
-## Saltbox
-
-The QuickLinks Saltbox Sandbox role supplies the Saltbox inventory username and password as the initial credentials, so unattended installs continue to work. After the role is accepted into the official Sandbox repository, install it with:
-
-```bash
-sb install sandbox-quicklinks
-```
-
-Until then, use the role from its [Sandbox pull request](https://github.com/saltyorg/Sandbox/pull/551).
 
 ## Build and test
 
@@ -98,7 +88,7 @@ One-time setup: add two repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_
 To cut a release, bump `VERSION` using the `YYYY.MM.DD.NNN` scheme, add a changelog entry, then tag the commit with exactly the same value:
 
 ```bash
-git tag 2026.08.11.002 && git push origin 2026.08.11.002
+git tag "$(cat VERSION)" && git push origin "$(cat VERSION)"
 ```
 
 The workflow refuses to publish when the tag and `VERSION` disagree. It pushes `jordanmfarmer/quicklinks:<version>` and moves `:latest`. A failed publish can be re-run from the Actions tab without retagging.

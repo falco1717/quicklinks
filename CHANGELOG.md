@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Removed the Saltbox integration documentation and the external deployment role it referenced. Unattended provisioning through `ADMIN_USERNAME` and `ADMIN_PASSWORD` is unchanged and still supported; only the Saltbox-specific packaging and instructions are gone.
+- Corrected the security note about the first-run page: it stays closed once *either* directory is enabled, not Active Directory alone.
+
 ## 2026.08.11.003
 
 ### Changed
@@ -76,5 +81,5 @@ Security release. Upgrading is strongly recommended for any reachable deployment
 - Added a one-time first-launch page for creating the initial administrator when environment credentials are blank.
 - Removed the built-in default administrator username, password, and session secret.
 - Added persistent automatic session-secret generation for zero-configuration launches.
-- Preserved unattended provisioning when both `ADMIN_USERNAME` and `ADMIN_PASSWORD` are supplied, including Saltbox installs.
+- Preserved unattended provisioning when both `ADMIN_USERNAME` and `ADMIN_PASSWORD` are supplied.
 - Added Docker, Compose, automated tests, CI, and project documentation.
