@@ -84,6 +84,10 @@
 
 .tool-section {
   display: grid;
+  /* Pack rows at the top: side by side in .auth-grid the shorter column is
+     stretched to the taller one's height, and stretched rows would spread the
+     content out with large gaps between the heading, help text and cards. */
+  align-content: start;
   gap: 14px;
   border-top: 1px solid var(--border);
   padding-top: 16px;

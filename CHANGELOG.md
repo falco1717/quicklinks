@@ -5,6 +5,7 @@
 ### Changed
 
 - Reworked the Authentication tab. Active Directory and Microsoft Entra ID no longer render their full forms side by side; each is now a compact row showing its status and a one-line summary, with a Configure button opening the settings in a dialog. Both providers' state stays visible at a glance, which a show-one-at-a-time toggle would have hidden. The tab is about 4x shorter as a result.
+- Tightened the Authentication tab's vertical rhythm. `.tool-section` is a grid whose rows stretched to fill the column, so beside a taller neighbour the heading's row grew to 90px for 24px of text and the help text's row to 81px for 17px, spreading the content apart. Rows are now packed to the top, taking the section's content block from 431px to 207px.
 - The dialogs are native `<dialog>` elements, so Escape and focus trapping come from the browser rather than from script. Closing is wired to a plain button: a `<form method="dialog">` inside the provider forms would have nested one form in another and silently truncated the outer one.
 
 ### Fixed
