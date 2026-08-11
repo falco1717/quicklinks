@@ -21,6 +21,9 @@ class FirstRunTests(unittest.TestCase):
         server.ADMIN_USERNAME = ""
         server.ADMIN_PASSWORD = ""
         server.SESSION_SECRET = ""
+        # setup_required() caches its answer for the life of the process, so it
+        # has to be cleared or one case leaks into the next.
+        server.reset_runtime_state()
 
     def tearDown(self):
         (
@@ -30,6 +33,7 @@ class FirstRunTests(unittest.TestCase):
             server.ADMIN_PASSWORD,
             server.SESSION_SECRET,
         ) = self.originals
+        server.reset_runtime_state()
         gc.collect()
         self.temp_dir.cleanup()
 
