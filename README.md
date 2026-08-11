@@ -20,6 +20,10 @@ ADMIN_PASSWORD=your-secure-password
 
 Both variables must be supplied together. A partial pair stops startup with a clear error. Existing administrator accounts in `data/links.db` are preserved during upgrades.
 
+## Running without Docker
+
+QuickLinks is a standard-library Python application, so it runs directly under systemd with no packages installed. See [docs/running-without-docker.md](docs/running-without-docker.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |

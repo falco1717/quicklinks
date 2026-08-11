@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Removed the Saltbox integration documentation and the external deployment role it referenced. Unattended provisioning through `ADMIN_USERNAME` and `ADMIN_PASSWORD` is unchanged and still supported; only the Saltbox-specific packaging and instructions are gone.
+- Added `docs/running-without-docker.md`: a tested step-by-step guide for running QuickLinks under systemd with no packages installed, including a hardened unit file, reverse proxy configuration, and backup and upgrade steps.
+- The error raised when Active Directory is enabled without `ldap3` installed no longer claims the application is running in a container.
 - Corrected the security note about the first-run page: it stays closed once *either* directory is enabled, not Active Directory alone.
 
 ## 2026.08.11.003

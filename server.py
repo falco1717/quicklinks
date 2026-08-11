@@ -520,7 +520,7 @@ def authenticate_ad(username, password):
         from ldap3 import Connection, Server, SIMPLE, SUBTREE
         from ldap3.utils.conv import escape_filter_chars
     except ImportError:
-        raise ValueError("Active Directory support is not installed in this container.")
+        raise ValueError("Active Directory support needs the ldap3 package, which is not installed.")
 
     domain = config.get("ad_domain", "").strip()
     if not domain:
