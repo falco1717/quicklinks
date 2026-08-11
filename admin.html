@@ -71,6 +71,19 @@
           </label>
           <button class="primary-button" type="submit">Sign in</button>
         </form>
+        <div id="entraLogin" class="sso-block hidden">
+          <p class="sso-divider"><span>or</span></p>
+          <button id="entraLoginButton" class="secondary-button sso-button" type="button">
+            <svg class="sso-mark" viewBox="0 0 23 23" aria-hidden="true" focusable="false">
+              <rect x="1" y="1" width="10" height="10" fill="#f25022"></rect>
+              <rect x="12" y="1" width="10" height="10" fill="#7fba00"></rect>
+              <rect x="1" y="12" width="10" height="10" fill="#00a4ef"></rect>
+              <rect x="12" y="12" width="10" height="10" fill="#ffb900"></rect>
+            </svg>
+            <span>Sign in with Microsoft</span>
+          </button>
+        </div>
+        <p id="loginError" class="login-error hidden" role="alert"></p>
       </section>
 
       <section id="adminPanel" class="hidden">
@@ -292,7 +305,7 @@
                       <span>Password</span>
                       <input id="localPassword" type="password" minlength="7" autocomplete="new-password">
                     </label>
-                    <p class="field-help">At least 10 characters. Leave blank when editing to keep the current password.</p>
+                    <p class="field-help">At least 7 characters. Leave blank when editing to keep the current password.</p>
                     <label class="check-field">
                       <input id="localUserEnabled" type="checkbox" checked>
                       <span>Account enabled</span>
@@ -341,6 +354,57 @@
                     </label>
                     <p class="field-help">Users authenticate directly against Active Directory. No Entra ID or service account is required.</p>
                     <button class="primary-button" type="submit">Save AD settings</button>
+                  </form>
+                </section>
+
+                <section class="tool-section">
+                  <h4>Microsoft Entra ID</h4>
+                  <form id="entraForm" class="admin-form">
+                    <div class="guidance-box">
+                      <strong>How to fill this out</strong>
+                      <p>In the Entra portal, register an application, then copy its Directory (tenant) ID and Application (client) ID here and add a client secret.</p>
+                      <p>Register the redirect URI below as a <em>Web</em> platform redirect on that application. It must be the public address of this site followed by <code>/api/auth/entra/callback</code>.</p>
+                      <p>Authorize administrators by user principal name, by security group <em>object ID</em>, or by app role value. App roles are the most reliable for users who belong to many groups.</p>
+                    </div>
+                    <label class="check-field">
+                      <input id="entraEnabled" type="checkbox">
+                      <span>Allow Microsoft Entra ID login</span>
+                    </label>
+                    <div class="form-grid">
+                      <label class="field">
+                        <span>Directory (tenant) ID</span>
+                        <input id="entraTenantId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+                      </label>
+                      <label class="field">
+                        <span>Application (client) ID</span>
+                        <input id="entraClientId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+                      </label>
+                    </div>
+                    <label class="field">
+                      <span>Client secret</span>
+                      <input id="entraClientSecret" type="password" autocomplete="off" placeholder="Leave blank to keep the stored secret">
+                    </label>
+                    <p id="entraSecretState" class="field-help"></p>
+                    <label class="field">
+                      <span>Redirect URI</span>
+                      <input id="entraRedirectUri" type="text" placeholder="https://links.example.com/api/auth/entra/callback">
+                    </label>
+                    <div class="form-grid">
+                      <label class="field">
+                        <span>Admin users</span>
+                        <textarea id="entraAdminUsers" rows="5" placeholder="one user principal name per line"></textarea>
+                      </label>
+                      <label class="field">
+                        <span>Admin groups</span>
+                        <textarea id="entraAdminGroups" rows="5" placeholder="one group object ID per line"></textarea>
+                      </label>
+                    </div>
+                    <label class="field">
+                      <span>Admin app roles</span>
+                      <textarea id="entraAdminRoles" rows="3" placeholder="one app role value per line"></textarea>
+                    </label>
+                    <p class="field-help">Sign-in happens on Microsoft's own page, so multi-factor authentication and Conditional Access policies apply. Changing any setting here signs out current Entra sessions.</p>
+                    <button class="primary-button" type="submit">Save Entra settings</button>
                   </form>
                 </section>
               </div>

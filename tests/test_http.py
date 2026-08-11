@@ -6,7 +6,9 @@ traversable static handler, sessions that outlived logout -- were all invisible
 from inside the module.
 """
 
+import base64
 import gc
+import hashlib
 import http.client
 import json
 import socket
@@ -15,6 +17,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import server
 
@@ -68,7 +71,7 @@ class ServerTestCase(unittest.TestCase):
 
     # -- helpers ---------------------------------------------------------
 
-    def request(self, method, path, body=None, token=None, headers=None):
+    def request(self, method, path, body=None, token=None, headers=None, cookies=None):
         """Send `path` verbatim, without client-side normalization."""
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
@@ -77,14 +80,19 @@ class ServerTestCase(unittest.TestCase):
             if body is not None:
                 payload = json.dumps(body).encode()
                 head["Content-Type"] = "application/json"
+            jar = dict(cookies or {})
             if token:
-                head["Cookie"] = f"{server.SESSION_COOKIE}={token}"
+                jar[server.SESSION_COOKIE] = token
+            if jar:
+                head["Cookie"] = "; ".join(f"{name}={value}" for name, value in jar.items())
             connection.request(method, path, body=payload, headers=head)
             response = connection.getresponse()
             return {
                 "status": response.status,
                 "body": response.read(),
                 "set_cookie": response.getheader("Set-Cookie"),
+                "cookies": response.headers.get_all("Set-Cookie") or [],
+                "location": response.getheader("Location"),
                 "headers": dict(response.getheaders()),
             }
         finally:
@@ -588,6 +596,348 @@ class ImportTests(ServerTestCase):
         export = self.request("GET", "/api/export.csv", token=token)
         self.assertEqual(export["status"], 200)
         self.assertIn(b"https://svc.example.com", export["body"])
+
+
+TENANT_ID = "11111111-2222-3333-4444-555555555555"
+CLIENT_ID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+REDIRECT_URI = "https://links.example.com/api/auth/entra/callback"
+
+
+def entra_settings(**overrides):
+    payload = {
+        "enabled": True,
+        "tenant_id": TENANT_ID,
+        "client_id": CLIENT_ID,
+        "client_secret": "a-client-secret",
+        "redirect_uri": REDIRECT_URI,
+        "admin_users": "owner@example.com",
+        "admin_groups": "",
+        "admin_roles": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def id_token(**claims):
+    """Build an unsigned ID token. The server reads claims from the payload."""
+    payload = {
+        "iss": f"{server.ENTRA_AUTHORITY}/{TENANT_ID}/v2.0",
+        "aud": CLIENT_ID,
+        "tid": TENANT_ID,
+        "exp": int(server.time.time()) + 600,
+        "nbf": int(server.time.time()) - 60,
+        "preferred_username": "owner@example.com",
+    }
+    payload.update(claims)
+    encode = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return ".".join([
+        encode(b'{"alg":"RS256","typ":"JWT"}'),
+        encode(json.dumps(payload).encode()),
+        encode(b"not-a-real-signature"),
+    ])
+
+
+class EntraConfigTests(ServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.token = self.create_admin()
+
+    def save(self, **overrides):
+        return self.request(
+            "POST", "/api/entra-config", entra_settings(**overrides), token=self.token
+        )
+
+    def test_valid_settings_are_accepted_and_enable_the_button(self):
+        self.assertEqual(self.save()["status"], 200)
+        self.assertTrue(self.json_body(self.request("GET", "/api/session"))["entra_available"])
+
+    def test_client_secret_is_never_returned(self):
+        self.save()
+        payload = self.json_body(self.request("GET", "/api/auth-config", token=self.token))
+        self.assertNotIn("client_secret", payload["entra"])
+        self.assertTrue(payload["entra"]["client_secret_set"])
+        self.assertNotIn(b"a-client-secret", self.request("GET", "/api/auth-config", token=self.token)["body"])
+
+    def test_blank_secret_keeps_the_stored_one(self):
+        self.save()
+        self.assertEqual(self.save(client_secret="", admin_users="someone@example.com")["status"], 200)
+        payload = self.json_body(self.request("GET", "/api/auth-config", token=self.token))
+        self.assertTrue(payload["entra"]["client_secret_set"])
+        self.assertEqual(payload["entra"]["admin_users"], "someone@example.com")
+
+    def test_incomplete_settings_are_rejected(self):
+        cases = [
+            ({"tenant_id": "contoso.com"}, "Directory (tenant) ID"),
+            ({"client_id": "not-a-guid"}, "Application (client) ID"),
+            ({"client_secret": ""}, "client secret is required"),
+            ({"redirect_uri": "http://links.example.com/api/auth/entra/callback"}, "must use https"),
+            ({"redirect_uri": "https://links.example.com/wrong"}, "must end with"),
+            ({"admin_users": "", "admin_groups": "", "admin_roles": ""}, "at least one"),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                response = self.save(**overrides)
+                self.assertEqual(response["status"], 400)
+                self.assertIn(expected, self.json_body(response)["error"])
+
+    def test_settings_may_be_saved_while_disabled_without_validation(self):
+        response = self.save(enabled=False, tenant_id="", client_id="", client_secret="", redirect_uri="")
+        self.assertEqual(response["status"], 200)
+        self.assertFalse(self.json_body(self.request("GET", "/api/session"))["entra_available"])
+
+    def test_config_endpoint_requires_admin(self):
+        self.assertEqual(self.request("POST", "/api/entra-config", entra_settings())["status"], 401)
+
+
+class EntraFlowTests(ServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin_token = self.create_admin()
+        self.assertEqual(
+            self.request("POST", "/api/entra-config", entra_settings(), token=self.admin_token)["status"],
+            200,
+        )
+
+    def start(self):
+        response = self.request("GET", "/api/auth/entra/start")
+        self.assertEqual(response["status"], 303)
+        flow = next(
+            value.split(";", 1)[0].split("=", 1)[1]
+            for value in response["cookies"]
+            if value.startswith(f"{server.ENTRA_FLOW_COOKIE}=")
+        )
+        return response, flow
+
+    def callback(self, query, flow=None):
+        cookies = {server.ENTRA_FLOW_COOKIE: flow} if flow else None
+        return self.request("GET", f"/api/auth/entra/callback?{query}", cookies=cookies)
+
+    def test_start_redirects_to_microsoft_with_pkce(self):
+        response, flow = self.start()
+        target = urlparse(response["location"])
+        params = {key: value[0] for key, value in parse_qs(target.query).items()}
+        self.assertEqual(f"{target.scheme}://{target.netloc}", server.ENTRA_AUTHORITY)
+        self.assertEqual(target.path, f"/{TENANT_ID}/oauth2/v2.0/authorize")
+        self.assertEqual(params["client_id"], CLIENT_ID)
+        self.assertEqual(params["response_type"], "code")
+        self.assertEqual(params["redirect_uri"], REDIRECT_URI)
+        self.assertEqual(params["code_challenge_method"], "S256")
+        self.assertTrue(params["code_challenge"] and params["state"] and params["nonce"])
+
+        # The challenge must be the S256 hash of the verifier held in the cookie,
+        # never the verifier itself.
+        pending = server.verify_payload(flow)
+        expected = base64.urlsafe_b64encode(
+            hashlib.sha256(pending["verifier"].encode()).digest()
+        ).decode().rstrip("=")
+        self.assertEqual(params["code_challenge"], expected)
+        self.assertNotIn(pending["verifier"], response["location"])
+        self.assertEqual(params["state"], pending["state"])
+
+    def test_start_is_refused_when_entra_is_disabled(self):
+        self.request(
+            "POST", "/api/entra-config", entra_settings(enabled=False), token=self.admin_token
+        )
+        response = self.request("GET", "/api/auth/entra/start")
+        self.assertEqual(response["status"], 303)
+        self.assertEqual(response["location"], "/admin?entra_error=config")
+
+    def test_callback_rejects_a_missing_or_mismatched_state(self):
+        _, flow = self.start()
+        for query, cookie in (
+            ("code=abc&state=wrong-state", flow),
+            ("code=abc", flow),
+            ("code=abc&state=anything", None),
+            ("state=onlystate", flow),
+        ):
+            with self.subTest(query=query, has_cookie=bool(cookie)):
+                response = self.callback(query, cookie)
+                self.assertEqual(response["location"], "/admin?entra_error=state")
+
+    def test_callback_surfaces_a_microsoft_error(self):
+        _, flow = self.start()
+        response = self.callback("error=access_denied&error_description=user+cancelled", flow)
+        self.assertEqual(response["location"], "/admin?entra_error=denied")
+
+    def test_callback_never_issues_a_session_on_failure(self):
+        _, flow = self.start()
+        response = self.callback("code=abc&state=wrong", flow)
+        self.assertNotIn(
+            server.SESSION_COOKIE,
+            " ".join(value.split("=", 1)[0] for value in response["cookies"]),
+        )
+
+    def test_successful_sign_in_issues_an_entra_session(self):
+        pending = None
+
+        def fake_exchange(config, code, verifier):
+            # Prove the real verifier reaches the token endpoint.
+            self.assertEqual(verifier, pending["verifier"])
+            self.assertEqual(code, "the-auth-code")
+            return {"id_token": id_token(nonce=pending["nonce"])}
+
+        response, flow = self.start()
+        pending = server.verify_payload(flow)
+        original = server.exchange_entra_code
+        server.exchange_entra_code = fake_exchange
+        try:
+            result = self.callback(f"code=the-auth-code&state={pending['state']}", flow)
+        finally:
+            server.exchange_entra_code = original
+
+        self.assertEqual(result["status"], 303)
+        self.assertEqual(result["location"], "/admin")
+        session = next(
+            value.split(";", 1)[0].split("=", 1)[1]
+            for value in result["cookies"]
+            if value.startswith(f"{server.SESSION_COOKIE}=")
+        )
+        self.assertEqual(server.parse_session(session)["source"], "entra")
+        self.assertEqual(server.parse_session(session)["username"], "owner@example.com")
+        self.assertEqual(self.request("GET", "/api/admin", token=session)["status"], 200)
+
+        # Disabling Entra invalidates the session it issued.
+        self.request(
+            "POST", "/api/entra-config", entra_settings(enabled=False), token=self.admin_token
+        )
+        self.assertEqual(self.request("GET", "/api/admin", token=session)["status"], 401)
+
+    def test_changing_entra_settings_signs_out_earlier_entra_sessions(self):
+        self.request(
+            "POST", "/api/entra-config",
+            entra_settings(admin_users="someone-else@example.com"),
+            token=self.admin_token,
+        )
+        # Pinned to the stored epoch rather than wall-clock offsets, so the
+        # cutoff is asserted exactly instead of depending on test timing.
+        with server.db() as conn:
+            epoch = server.source_config_epoch(conn, "entra")
+        self.assertTrue(epoch > 0)
+        stale = server.sign_session("entra", "owner@example.com", epoch - 1, epoch + 3600)
+        fresh = server.sign_session("entra", "owner@example.com", epoch, epoch + 3600)
+        self.assertEqual(self.request("GET", "/api/admin", token=stale)["status"], 401)
+        self.assertEqual(self.request("GET", "/api/admin", token=fresh)["status"], 200)
+
+    def test_changing_settings_does_not_sign_out_local_administrators(self):
+        # An administrator configuring a directory must not log themselves out.
+        self.assertEqual(self.request("GET", "/api/admin", token=self.admin_token)["status"], 200)
+        self.request(
+            "POST", "/api/entra-config",
+            entra_settings(admin_users="someone-else@example.com"),
+            token=self.admin_token,
+        )
+        self.assertEqual(self.request("GET", "/api/admin", token=self.admin_token)["status"], 200)
+
+    def test_entra_session_logout_revokes_it(self):
+        issued = int(server.time.time())
+        session = server.sign_session("entra", "owner@example.com", issued, issued + 3600)
+        self.assertEqual(self.request("POST", "/api/logout", {}, token=session)["status"], 200)
+        self.assertEqual(self.request("GET", "/api/admin", token=session)["status"], 401)
+
+    def test_last_local_admin_may_be_removed_once_entra_is_enabled(self):
+        users = self.json_body(self.request("GET", "/api/auth-config", token=self.admin_token))["users"]
+        response = self.request(
+            "DELETE", f"/api/admin-users/{users[0]['id']}", token=self.admin_token
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        server.reset_runtime_state()  # simulate a restart
+        self.assertFalse(server.setup_required())
+        self.assertEqual(
+            self.request("POST", "/api/setup", {"username": "attacker", "password": PASSWORD})["status"],
+            400,
+        )
+
+
+class EntraClaimTests(unittest.TestCase):
+    """Claim validation, checked directly so each rule has its own case."""
+
+    def setUp(self):
+        self.config = {"tenant_id": TENANT_ID, "client_id": CLIENT_ID}
+        self.nonce = "the-nonce"
+
+    def claims(self, **overrides):
+        payload = json.loads(
+            base64.urlsafe_b64decode(
+                id_token(nonce=self.nonce).split(".")[1] + "=="
+            )
+        )
+        payload.update(overrides)
+        return payload
+
+    def test_valid_claims_pass(self):
+        server.validate_entra_claims(self.claims(), self.config, self.nonce)
+
+    def test_each_rule_rejects(self):
+        other_tenant = "99999999-9999-9999-9999-999999999999"
+        cases = [
+            ({"tid": other_tenant, "iss": f"{server.ENTRA_AUTHORITY}/{other_tenant}/v2.0"}, "different Microsoft tenant"),
+            ({"tid": "contoso.com"}, "different Microsoft tenant"),
+            ({"iss": "https://evil.example.com/v2.0"}, "issuer was not recognised"),
+            ({"iss": f"{server.ENTRA_AUTHORITY}/{TENANT_ID}/v1.0"}, "issuer was not recognised"),
+            ({"aud": "another-client"}, "different application"),
+            ({"nonce": "replayed"}, "could not be matched"),
+            ({"exp": int(server.time.time()) - 3600}, "expired"),
+            ({"nbf": int(server.time.time()) + 3600}, "not valid yet"),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, expected):
+                    server.validate_entra_claims(self.claims(**overrides), self.config, self.nonce)
+
+    def test_audience_may_be_a_list(self):
+        server.validate_entra_claims(
+            self.claims(aud=["other", CLIENT_ID]), self.config, self.nonce
+        )
+
+    def test_missing_nonce_on_our_side_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "could not be matched"):
+            server.validate_entra_claims(self.claims(), self.config, "")
+
+    def test_unreadable_token_is_rejected(self):
+        for value in (None, "", "not-a-jwt", "a.b", "a.!!!.c"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "readable ID token"):
+                    server.decode_jwt_claims(value)
+
+
+class EntraAuthorizationTests(unittest.TestCase):
+    def config(self, **overrides):
+        base = {"admin_users": "", "admin_groups": "", "admin_roles": ""}
+        base.update(overrides)
+        return base
+
+    def test_user_match_is_case_insensitive_across_name_claims(self):
+        config = self.config(admin_users="Owner@Example.COM")
+        for key in ("preferred_username", "upn", "email", "unique_name"):
+            with self.subTest(claim=key):
+                self.assertTrue(server.entra_authorized({key: "owner@example.com"}, config))
+
+    def test_group_object_ids_authorize(self):
+        group = "abcdef01-2345-6789-abcd-ef0123456789"
+        config = self.config(admin_groups=group.upper())
+        self.assertTrue(server.entra_authorized({"groups": [group]}, config))
+        self.assertFalse(server.entra_authorized({"groups": ["another-group"]}, config))
+
+    def test_app_roles_authorize(self):
+        config = self.config(admin_roles="QuickLinks.Admin")
+        self.assertTrue(server.entra_authorized({"roles": ["quicklinks.admin"]}, config))
+        self.assertFalse(server.entra_authorized({"roles": ["QuickLinks.Reader"]}, config))
+
+    def test_nothing_configured_denies_everyone(self):
+        self.assertFalse(
+            server.entra_authorized({"preferred_username": "owner@example.com"}, self.config())
+        )
+
+    def test_group_overage_is_denied_and_logged(self):
+        config = self.config(admin_groups="abcdef01-2345-6789-abcd-ef0123456789")
+        claims = {
+            "preferred_username": "owner@example.com",
+            "_claim_names": {"groups": "src1"},
+            "_claim_sources": {"src1": {"endpoint": "https://graph.microsoft.com/..."}},
+        }
+        with self.assertLogs(server.LOGGER, level="WARNING") as captured:
+            self.assertFalse(server.entra_authorized(claims, config))
+        self.assertIn("overage", " ".join(captured.output))
 
 
 if __name__ == "__main__":

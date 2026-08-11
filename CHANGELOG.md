@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026.08.11.002
+
+### Added
+
+- Microsoft Entra ID authentication, using the OIDC authorization code flow with PKCE. Sign-in happens on Microsoft's page, so multi-factor authentication and Conditional Access apply. The older username/password grant was not used: it does not support either, and many tenants block it.
+- A "Sign in with Microsoft" button on the admin sign-in page, shown only when Entra is enabled and fully configured. Local accounts and on-premises Active Directory continue to work alongside it, so a local break-glass login remains available.
+- An Entra section under Admin → Authentication for the tenant ID, client ID, client secret, redirect URI, and the allowed users, group object IDs, and app role values. Any one match grants access.
+- Sign-in failures now appear on the page itself rather than as a browser dialog, from a fixed set of messages the page owns; the reason code in the URL is never rendered directly.
+
+### Changed
+
+- Editing which users, groups, or roles a directory authorizes now signs out that directory's existing sessions, so removing someone takes effect immediately instead of at the end of their session. Local administrator sessions are unaffected, so configuring a directory does not sign out the administrator doing it.
+- The last enabled local administrator may now be removed once *either* Active Directory or Entra ID is enabled, and the first-run setup page stays closed in both cases.
+- `GET /api/auth-config` reports whether an Entra client secret is stored, never the secret itself.
+
+### Fixed
+
+- The local administrator form claimed a 10 character minimum where the server enforces 7.
+
 ## 2026.08.11.001
 
 Security release. Upgrading is strongly recommended for any reachable deployment.

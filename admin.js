@@ -94,7 +94,28 @@ const el = {
   adDomain: document.querySelector("#adDomain"),
   adAdminUsers: document.querySelector("#adAdminUsers"),
   adAdminGroups: document.querySelector("#adAdminGroups"),
+  entraLogin: document.querySelector("#entraLogin"),
+  entraLoginButton: document.querySelector("#entraLoginButton"),
+  loginError: document.querySelector("#loginError"),
+  entraForm: document.querySelector("#entraForm"),
+  entraEnabled: document.querySelector("#entraEnabled"),
+  entraTenantId: document.querySelector("#entraTenantId"),
+  entraClientId: document.querySelector("#entraClientId"),
+  entraClientSecret: document.querySelector("#entraClientSecret"),
+  entraSecretState: document.querySelector("#entraSecretState"),
+  entraRedirectUri: document.querySelector("#entraRedirectUri"),
+  entraAdminUsers: document.querySelector("#entraAdminUsers"),
+  entraAdminGroups: document.querySelector("#entraAdminGroups"),
+  entraAdminRoles: document.querySelector("#entraAdminRoles"),
   productNotice: document.querySelector("#productNotice")
+};
+
+const ENTRA_ERRORS = {
+  config: "Microsoft Entra ID sign-in is not configured yet. An administrator can set it up under Authentication.",
+  denied: "Microsoft did not complete the sign-in. You can try again or use a local account.",
+  state: "That sign-in could not be matched to this browser. Start again from this page.",
+  token: "The Microsoft sign-in could not be verified. Check the server log for details.",
+  forbidden: "That Microsoft account is not an allowed QuickLinks administrator."
 };
 
 function applyProductNotice(product = {}) {
@@ -204,8 +225,24 @@ function renderList() {
   setStatus(`${locations.length} of ${state.locations.length} locations`);
 }
 
+function showLoginError(message) {
+  el.loginError.textContent = message || "";
+  el.loginError.classList.toggle("hidden", !message);
+}
+
+function reportEntraRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  const reason = params.get("entra_error");
+  if (!reason) return;
+  // Only ever render a message this page owns, never the raw query value.
+  showLoginError(ENTRA_ERRORS[reason] || ENTRA_ERRORS.token);
+  params.delete("entra_error");
+  const query = params.toString();
+  window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+}
+
 function renderAuthentication() {
-  const { users = [], ad = {} } = state.auth;
+  const { users = [], ad = {}, entra = {} } = state.auth;
   el.localUserList.replaceChildren();
   users.forEach((user) => {
     const button = document.createElement("button");
@@ -223,6 +260,22 @@ function renderAuthentication() {
   el.adDomain.value = ad.domain || "";
   el.adAdminUsers.value = ad.admin_users || "";
   el.adAdminGroups.value = ad.admin_groups || "";
+
+  el.entraEnabled.checked = Boolean(entra.enabled);
+  el.entraTenantId.value = entra.tenant_id || "";
+  el.entraClientId.value = entra.client_id || "";
+  el.entraClientSecret.value = "";
+  el.entraRedirectUri.value = entra.redirect_uri || defaultEntraRedirectUri();
+  el.entraAdminUsers.value = entra.admin_users || "";
+  el.entraAdminGroups.value = entra.admin_groups || "";
+  el.entraAdminRoles.value = entra.admin_roles || "";
+  el.entraSecretState.textContent = entra.client_secret_set
+    ? "A client secret is stored. Leave the field blank to keep it, or enter a new one to replace it."
+    : "No client secret is stored yet. One is required before Entra login can be enabled.";
+}
+
+function defaultEntraRedirectUri() {
+  return `${window.location.origin}/api/auth/entra/callback`;
 }
 
 function resetLocalUser() {
@@ -400,6 +453,10 @@ async function refreshAdmin() {
 async function checkSession() {
   const payload = await api("/api/session");
   showApp(payload.authenticated, payload.setup_required);
+  el.entraLogin.classList.toggle(
+    "hidden",
+    !payload.entra_available || payload.authenticated || payload.setup_required
+  );
   if (payload.authenticated) {
     await refreshAdmin();
     resetLinkForm();
@@ -430,6 +487,7 @@ el.setupForm.addEventListener("submit", async (event) => {
 
 el.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  showLoginError("");
   try {
     await api("/api/login", {
       method: "POST",
@@ -437,8 +495,36 @@ el.loginForm.addEventListener("submit", async (event) => {
     });
     el.passwordInput.value = "";
     showApp(true);
+    el.entraLogin.classList.add("hidden");
     await refreshAdmin();
     resetLinkForm();
+  } catch (error) {
+    showLoginError(error.message);
+  }
+});
+
+el.entraLoginButton.addEventListener("click", () => {
+  window.location.assign("/api/auth/entra/start");
+});
+
+el.entraForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    state.auth = await api("/api/entra-config", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: el.entraEnabled.checked,
+        tenant_id: el.entraTenantId.value,
+        client_id: el.entraClientId.value,
+        client_secret: el.entraClientSecret.value,
+        redirect_uri: el.entraRedirectUri.value,
+        admin_users: el.entraAdminUsers.value,
+        admin_groups: el.entraAdminGroups.value,
+        admin_roles: el.entraAdminRoles.value
+      })
+    });
+    renderAuthentication();
+    setStatus("Microsoft Entra ID settings saved.");
   } catch (error) {
     alert(error.message);
   }
@@ -655,4 +741,5 @@ el.deleteLocationButton.addEventListener("click", async () => {
   resetLocationForm();
 });
 
+reportEntraRedirect();
 checkSession().catch(() => showApp(false, false));
