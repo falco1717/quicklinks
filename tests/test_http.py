@@ -117,8 +117,17 @@ class ServerTestCase(unittest.TestCase):
         return self.request("POST", "/api/login", {"username": username, "password": password})
 
     def temp_file(self, path, content=b"canary"):
-        """Create a file (and any missing parent) and remove it in tearDown."""
+        """Create a file (and any missing parent) and remove it in tearDown.
+
+        Refuses to touch an existing path. These fixtures live in the real
+        application directory, so silently overwriting one would destroy a
+        developer's own file -- and tearDown would then delete it.
+        """
         path = Path(path)
+        self.assertFalse(
+            path.exists(),
+            f"{path} already exists; a test fixture must never overwrite real data",
+        )
         if not path.parent.exists():
             path.parent.mkdir(parents=True)
             self.created_paths.append(path.parent)
@@ -143,13 +152,24 @@ class StaticFileTests(ServerTestCase):
     def test_data_directory_is_never_served(self):
         # Recreate the shipped Docker layout, where DATA_DIR sits inside the
         # application directory, and confirm nothing in it is reachable.
-        self.temp_file(server.APP_DIR / "data" / ".session_secret", b"super-secret")
-        self.temp_file(server.APP_DIR / "data" / "links.db", b"sqlite")
-        for path in ("/data/.session_secret", "/data/links.db", "/data/", "/data"):
+        # Canary names deliberately avoid links.db and .session_secret: that
+        # directory is the default DATA_DIR, so a fixture using the real names
+        # would clobber a locally running instance's database.
+        self.temp_file(server.APP_DIR / "data" / ".quicklinks-secret-canary", b"super-secret")
+        self.temp_file(server.APP_DIR / "data" / "quicklinks-canary.db", b"sqlite-canary")
+        for path in (
+            "/data/.quicklinks-secret-canary",
+            "/data/quicklinks-canary.db",
+            "/data/.session_secret",
+            "/data/links.db",
+            "/data/",
+            "/data",
+        ):
             with self.subTest(path=path):
                 response = self.request("GET", path)
                 self.assertEqual(response["status"], 404)
                 self.assertNotIn(b"super-secret", response["body"])
+                self.assertNotIn(b"sqlite-canary", response["body"])
 
     def test_source_and_config_are_not_served(self):
         for path in (

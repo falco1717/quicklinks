@@ -319,100 +319,134 @@
                 </section>
 
                 <section class="tool-section">
-                  <h4>Active Directory</h4>
-                  <form id="adForm" class="admin-form">
-                    <div class="guidance-box">
-                      <strong>How to fill this out</strong>
-                      <p>Enter your AD DNS domain. The domain controller is optional and will be discovered automatically when left blank.</p>
-                      <p>Add usernames and groups one per line. Groups may use a group name, sAMAccountName, SID, or distinguished name.</p>
-                    </div>
-                    <label class="check-field">
-                      <input id="adEnabled" type="checkbox">
-                      <span>Allow Active Directory login</span>
-                    </label>
-                    <label class="field">
-                      <span>AD domain</span>
-                      <input id="adDomain" type="text" placeholder="example.com">
-                    </label>
-                    <label class="field">
-                      <span>AD server</span>
-                      <input id="adServer" type="text" placeholder="Optional domain controller">
-                    </label>
-                    <div class="form-grid">
-                      <label class="field">
-                        <span>Admin users</span>
-                        <textarea id="adAdminUsers" rows="6" placeholder="one username per line"></textarea>
-                      </label>
-                      <label class="field">
-                        <span>Admin groups</span>
-                        <textarea id="adAdminGroups" rows="6" placeholder="one AD group name or SID per line"></textarea>
-                      </label>
-                    </div>
-                    <label class="check-field">
-                      <input id="adSsl" type="checkbox" checked>
-                      <span>Use LDAPS encryption</span>
-                    </label>
-                    <p class="field-help">Users authenticate directly against Active Directory. No Entra ID or service account is required.</p>
-                    <button class="primary-button" type="submit">Save AD settings</button>
-                  </form>
+                  <h4>Directory sign-in</h4>
+                  <p class="field-help">Local accounts always work. A directory is optional, and both can be enabled at once.</p>
+                  <ul class="provider-list">
+                    <li class="provider-row">
+                      <div class="provider-detail">
+                        <span class="provider-name">Active Directory</span>
+                        <span id="adSummary" class="provider-summary"></span>
+                      </div>
+                      <span id="adStatus" class="status-pill"></span>
+                      <button id="adConfigureButton" class="secondary-button" type="button" aria-haspopup="dialog">Configure</button>
+                    </li>
+                    <li class="provider-row">
+                      <div class="provider-detail">
+                        <span class="provider-name">Microsoft Entra ID</span>
+                        <span id="entraSummary" class="provider-summary"></span>
+                      </div>
+                      <span id="entraStatus" class="status-pill"></span>
+                      <button id="entraConfigureButton" class="secondary-button" type="button" aria-haspopup="dialog">Configure</button>
+                    </li>
+                  </ul>
                 </section>
 
-                <section class="tool-section">
-                  <h4>Microsoft Entra ID</h4>
-                  <form id="entraForm" class="admin-form">
-                    <div class="guidance-box">
-                      <strong>How to fill this out</strong>
-                      <p>In the Entra portal, register an application, then copy its Directory (tenant) ID and Application (client) ID here and add a client secret.</p>
-                      <p>Register the redirect URI below as a <em>Web</em> platform redirect on that application. It must be the public address of this site followed by <code>/api/auth/entra/callback</code>.</p>
-                      <p>Authorize administrators by user principal name, by security group <em>object ID</em>, or by app role value. App roles are the most reliable for users who belong to many groups.</p>
-                    </div>
-                    <label class="check-field">
-                      <input id="entraEnabled" type="checkbox">
-                      <span>Allow Microsoft Entra ID login</span>
-                    </label>
-                    <div class="form-grid">
-                      <label class="field">
-                        <span>Directory (tenant) ID</span>
-                        <input id="entraTenantId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
-                      </label>
-                      <label class="field">
-                        <span>Application (client) ID</span>
-                        <input id="entraClientId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
-                      </label>
-                    </div>
-                    <label class="field">
-                      <span>Client secret</span>
-                      <input id="entraClientSecret" type="password" autocomplete="off" placeholder="Leave blank to keep the stored secret">
-                    </label>
-                    <p id="entraSecretState" class="field-help"></p>
-                    <label class="field">
-                      <span>Redirect URI</span>
-                      <input id="entraRedirectUri" type="text" placeholder="https://links.example.com/api/auth/entra/callback">
-                    </label>
-                    <div class="form-grid">
-                      <label class="field">
-                        <span>Admin users</span>
-                        <textarea id="entraAdminUsers" rows="5" placeholder="one user principal name per line"></textarea>
-                      </label>
-                      <label class="field">
-                        <span>Admin groups</span>
-                        <textarea id="entraAdminGroups" rows="5" placeholder="one group object ID per line"></textarea>
-                      </label>
-                    </div>
-                    <label class="field">
-                      <span>Admin app roles</span>
-                      <textarea id="entraAdminRoles" rows="3" placeholder="one app role value per line"></textarea>
-                    </label>
-                    <p class="field-help">Sign-in happens on Microsoft's own page, so multi-factor authentication and Conditional Access policies apply. Changing any setting here signs out current Entra sessions.</p>
-                    <button class="primary-button" type="submit">Save Entra settings</button>
-                  </form>
-                </section>
               </div>
             </div>
           </section>
         </div>
       </section>
     </main>
+
+    <dialog id="adDialog" class="config-dialog" aria-labelledby="adDialogTitle">
+      <div class="dialog-head">
+        <h3 id="adDialogTitle">Active Directory</h3>
+        <button id="adDialogClose" class="icon-button" type="button" aria-label="Close">&#215;</button>
+      </div>
+      <div class="dialog-body">
+        <form id="adForm" class="admin-form">
+          <div class="guidance-box">
+            <strong>How to fill this out</strong>
+            <p>Enter your AD DNS domain. The domain controller is optional and will be discovered automatically when left blank.</p>
+            <p>Add usernames and groups one per line. Groups may use a group name, sAMAccountName, SID, or distinguished name.</p>
+          </div>
+          <label class="check-field">
+            <input id="adEnabled" type="checkbox">
+            <span>Allow Active Directory login</span>
+          </label>
+          <label class="field">
+            <span>AD domain</span>
+            <input id="adDomain" type="text" placeholder="example.com">
+          </label>
+          <label class="field">
+            <span>AD server</span>
+            <input id="adServer" type="text" placeholder="Optional domain controller">
+          </label>
+          <div class="form-grid">
+            <label class="field">
+              <span>Admin users</span>
+              <textarea id="adAdminUsers" rows="6" placeholder="one username per line"></textarea>
+            </label>
+            <label class="field">
+              <span>Admin groups</span>
+              <textarea id="adAdminGroups" rows="6" placeholder="one AD group name or SID per line"></textarea>
+            </label>
+          </div>
+          <label class="check-field">
+            <input id="adSsl" type="checkbox" checked>
+            <span>Use LDAPS encryption</span>
+          </label>
+          <p class="field-help">Users authenticate directly against Active Directory. No Entra ID or service account is required.</p>
+          <button class="primary-button" type="submit">Save AD settings</button>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="entraDialog" class="config-dialog" aria-labelledby="entraDialogTitle">
+      <div class="dialog-head">
+        <h3 id="entraDialogTitle">Microsoft Entra ID</h3>
+        <button id="entraDialogClose" class="icon-button" type="button" aria-label="Close">&#215;</button>
+      </div>
+      <div class="dialog-body">
+        <form id="entraForm" class="admin-form">
+          <div class="guidance-box">
+            <strong>How to fill this out</strong>
+            <p>In the Entra portal, register an application, then copy its Directory (tenant) ID and Application (client) ID here and add a client secret.</p>
+            <p>Register the redirect URI below as a <em>Web</em> platform redirect on that application. It must be the public address of this site followed by <code>/api/auth/entra/callback</code>.</p>
+            <p>Authorize administrators by user principal name, by security group <em>object ID</em>, or by app role value. App roles are the most reliable for users who belong to many groups.</p>
+          </div>
+          <label class="check-field">
+            <input id="entraEnabled" type="checkbox">
+            <span>Allow Microsoft Entra ID login</span>
+          </label>
+          <div class="form-grid">
+            <label class="field">
+              <span>Directory (tenant) ID</span>
+              <input id="entraTenantId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Application (client) ID</span>
+              <input id="entraClientId" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+            </label>
+          </div>
+          <label class="field">
+            <span>Client secret</span>
+            <input id="entraClientSecret" type="password" autocomplete="off" placeholder="Leave blank to keep the stored secret">
+          </label>
+          <p id="entraSecretState" class="field-help"></p>
+          <label class="field">
+            <span>Redirect URI</span>
+            <input id="entraRedirectUri" type="text" placeholder="https://links.example.com/api/auth/entra/callback">
+          </label>
+          <div class="form-grid">
+            <label class="field">
+              <span>Admin users</span>
+              <textarea id="entraAdminUsers" rows="5" placeholder="one user principal name per line"></textarea>
+            </label>
+            <label class="field">
+              <span>Admin groups</span>
+              <textarea id="entraAdminGroups" rows="5" placeholder="one group object ID per line"></textarea>
+            </label>
+          </div>
+          <label class="field">
+            <span>Admin app roles</span>
+            <textarea id="entraAdminRoles" rows="3" placeholder="one app role value per line"></textarea>
+          </label>
+          <p class="field-help">Sign-in happens on Microsoft's own page, so multi-factor authentication and Conditional Access policies apply. Changing any setting here signs out current Entra sessions.</p>
+          <button class="primary-button" type="submit">Save Entra settings</button>
+        </form>
+      </div>
+    </dialog>
 
     <footer id="productNotice" class="app-footer">QuickLinks · Created by Jordan Farmer</footer>
     <script src="admin.js"></script>
