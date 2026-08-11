@@ -1,4 +1,5 @@
 import gc
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,6 +68,48 @@ class FirstRunTests(unittest.TestCase):
         server.ADMIN_USERNAME = "owner"
         with self.assertRaisesRegex(RuntimeError, "must be provided together"):
             server.ensure_database()
+
+    @unittest.skipIf(os.name == "nt", "relies on POSIX directory permissions")
+    def test_unwritable_data_directory_reports_the_real_problem(self):
+        """The failure mode that crash-looped a real deployment.
+
+        Dropping all capabilities strips root's CAP_DAC_OVERRIDE, so a
+        container running as root still cannot write a directory whose mode
+        forbids it. That used to surface as a bare
+        `sqlite3.OperationalError: attempt to write a readonly database`.
+        """
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions")
+        os.chmod(server.DATA_DIR, 0o500)
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                server.ensure_database()
+            message = str(caught.exception)
+            self.assertIn(str(server.DATA_DIR), message)
+            self.assertIn("not writable", message)
+            self.assertIn("DATA_DIR", message)
+            self.assertIn("capabilities", message)
+            self.assertNotIn("readonly database", message)
+        finally:
+            os.chmod(server.DATA_DIR, 0o700)
+
+    @unittest.skipIf(os.name == "nt", "relies on POSIX file permissions")
+    def test_unwritable_database_file_reports_the_real_problem(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root bypasses file permissions")
+        server.ensure_database()
+        os.chmod(server.DB_PATH, 0o400)
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                server.ensure_database()
+            self.assertIn(str(server.DB_PATH), str(caught.exception))
+        finally:
+            os.chmod(server.DB_PATH, 0o600)
+
+    def test_data_directory_probe_leaves_nothing_behind(self):
+        server.ensure_database()
+        leftovers = [p.name for p in server.DATA_DIR.iterdir() if "probe" in p.name]
+        self.assertEqual(leftovers, [])
 
     def test_password_minimum_is_seven(self):
         server.ensure_database()

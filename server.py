@@ -173,9 +173,57 @@ def db():
         conn.close()
 
 
+def process_identity():
+    """Describe the running process well enough to fix a permission problem."""
+    try:
+        import getpass
+        name = getpass.getuser()
+    except Exception:
+        name = "unknown"
+    if hasattr(os, "geteuid"):
+        return f"uid {os.geteuid()}, gid {os.getegid()} ({name})"
+    return name
+
+
+def ensure_data_directory():
+    """Confirm DATA_DIR exists and is writable, and say so plainly if not.
+
+    Without this the first symptom of an unwritable data directory is
+    `sqlite3.OperationalError: attempt to write a readonly database` raised from
+    a PRAGMA, which names neither the directory nor the user and sends people
+    looking for a database problem they do not have.
+    """
+    advice = (
+        f"Set DATA_DIR to a writable path, or grant write access to {process_identity()}. "
+        "In a container, a bind-mounted directory must be writable by the container "
+        "user: note that dropping all capabilities removes root's ability to bypass "
+        "file permissions, so a root process is still subject to the directory mode."
+    )
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"Cannot create the data directory {DATA_DIR}: {error}. {advice}") from error
+    if not DATA_DIR.is_dir():
+        raise RuntimeError(f"The data directory {DATA_DIR} exists but is not a directory. {advice}")
+    probe = DATA_DIR / ".quicklinks-write-probe"
+    try:
+        probe.write_bytes(b"")
+    except OSError as error:
+        raise RuntimeError(
+            f"The data directory {DATA_DIR} is not writable: {error}. {advice}"
+        ) from error
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if DB_PATH.exists() and not os.access(DB_PATH, os.W_OK):
+        raise RuntimeError(f"The database file {DB_PATH} is not writable. {advice}")
+
+
 def ensure_database():
     global SESSION_SECRET
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_data_directory()
     if bool(ADMIN_USERNAME) != bool(ADMIN_PASSWORD):
         raise RuntimeError("ADMIN_USERNAME and ADMIN_PASSWORD must be provided together or both left blank.")
     if not SESSION_SECRET:
@@ -195,8 +243,17 @@ def ensure_database():
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 15000")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA busy_timeout = 15000")
+        except sqlite3.OperationalError as error:
+            # The preflight above catches the usual causes; anything left is
+            # worth reporting against the database path rather than as a bare
+            # PRAGMA failure.
+            raise RuntimeError(
+                f"Could not open the database at {DB_PATH} for writing: {error}. "
+                f"Check that {DATA_DIR} and its contents are writable by {process_identity()}."
+            ) from error
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
