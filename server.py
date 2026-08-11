@@ -4,16 +4,19 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import time
 import mimetypes
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from threading import Lock
+from urllib.parse import unquote, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -24,7 +27,21 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "").strip()
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
 SESSION_COOKIE = "quicklinks_admin_session"
 SESSION_MAX_AGE = 8 * 60 * 60
-APP_VERSION = "2026.08.10.001"
+SESSION_VERSION = "2"
+COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "auto").strip().lower()
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "").strip().lower() in ("1", "true", "yes")
+
+LOGGER = logging.getLogger("quicklinks")
+
+
+def read_version():
+    try:
+        return (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = read_version()
 PRODUCT_NOTICE = {
     "name": "QuickLinks",
     "version": APP_VERSION,
@@ -50,17 +67,90 @@ CSV_FIELDS = [
     "url", "description", "group_name", "cluster", "sort_order", "enabled",
 ]
 
+# Only these paths are served from disk. Everything else -- source code, the
+# database, the session secret, uploaded branding -- is unreachable over HTTP.
+STATIC_FILES = {
+    "/index.html",
+    "/admin.html",
+    "/app.js",
+    "/admin.js",
+    "/styles.css",
+    "/admin.css",
+    "/favicon.ico",
+}
+STATIC_DIRS = ("assets",)
+UNSERVABLE = "__quicklinks_forbidden__"
 
-LOCATIONS = []
-STANDARD_LINKS = []
-GENERAL_LINKS = []
-VHOSTS = []
+# Schemes that execute script in the browser when placed in an href. Everything
+# else (http, https, smb, rdp, mailto, host:port, relative paths) stays usable.
+BLOCKED_URL_SCHEMES = {"javascript", "data", "vbscript", "blob", "about", "filesystem"}
+
+MAX_REQUEST_BODY = 12 * 1024 * 1024
+MAX_CSV_BYTES = 5 * 1024 * 1024
+MAX_LOGO_BYTES = 5 * 1024 * 1024
+
+# Per-username lockout is strict because it protects one account. The per-IP
+# limit is loose so that a shared reverse-proxy address cannot lock out every
+# administrator at once.
+LOGIN_LIMITS = {
+    "user": {"max_failures": 5, "window": 300, "lockout": 900},
+    "ip": {"max_failures": 30, "window": 300, "lockout": 300},
+}
+THROTTLE_MAX_KEYS = 4096
+
+LINKS_TABLE_SQL = """
+    CREATE TABLE {if_not_exists}links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_type TEXT NOT NULL CHECK(page_type IN ('general','location')),
+      location_code TEXT,
+      link_type TEXT NOT NULL DEFAULT 'standard',
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      group_name TEXT NOT NULL DEFAULT 'General',
+      cluster TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY(location_code) REFERENCES locations(code)
+        ON UPDATE CASCADE ON DELETE CASCADE
+    )
+"""
+
+LINK_COLUMNS = (
+    "id, page_type, location_code, link_type, name, url, description, "
+    "group_name, cluster, sort_order, enabled"
+)
+
+_throttle = {}
+_throttle_lock = Lock()
+_setup_complete = False
+
+
+def reset_runtime_state():
+    """Clear process-local caches. Used by the test suite between cases."""
+    global _setup_complete
+    with _throttle_lock:
+        _throttle.clear()
+    _setup_complete = False
 
 
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@contextmanager
+def db():
+    """Open a connection, commit or roll back, and always close it."""
+    conn = connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def ensure_database():
@@ -79,8 +169,14 @@ def ensure_database():
                 secret_path.chmod(0o600)
             except OSError:
                 pass
-    conn = connect()
+    # Schema work runs on a connection with foreign keys left off so that table
+    # rebuilds are possible; PRAGMA foreign_keys is also a no-op inside a
+    # transaction, which the rebuild needs.
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 15000")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -94,20 +190,6 @@ def ensure_database():
               sort_order INTEGER NOT NULL DEFAULT 0,
               enabled INTEGER NOT NULL DEFAULT 1
             );
-            CREATE TABLE IF NOT EXISTS links (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              page_type TEXT NOT NULL CHECK(page_type IN ('general','location')),
-              location_code TEXT,
-              link_type TEXT NOT NULL DEFAULT 'standard',
-              name TEXT NOT NULL,
-              url TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              group_name TEXT NOT NULL DEFAULT 'General',
-              cluster TEXT NOT NULL DEFAULT '',
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              enabled INTEGER NOT NULL DEFAULT 1,
-              FOREIGN KEY(location_code) REFERENCES locations(code)
-            );
             CREATE TABLE IF NOT EXISTS admin_users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -115,17 +197,59 @@ def ensure_database():
               enabled INTEGER NOT NULL DEFAULT 1,
               created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS session_epochs (
+              source TEXT NOT NULL,
+              username TEXT NOT NULL COLLATE NOCASE,
+              epoch INTEGER NOT NULL,
+              PRIMARY KEY (source, username)
+            );
             """
         )
-        seeded = conn.execute("SELECT value FROM settings WHERE key = 'seeded'").fetchone()
-        if not seeded:
-            seed_database(conn)
-            conn.execute("INSERT INTO settings(key, value) VALUES('seeded', '1')")
-        apply_seed_updates(conn)
+        conn.execute(LINKS_TABLE_SQL.format(if_not_exists="IF NOT EXISTS "))
+        migrate_links_cascade(conn)
         seed_initial_admin(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def migrate_links_cascade(conn):
+    """Rebuild `links` so its location foreign key is enforced and cascades.
+
+    The original schema declared the key but never enabled `PRAGMA
+    foreign_keys`, so it was inert. Enforcing it requires ON UPDATE CASCADE,
+    otherwise renaming a location code would violate the constraint.
+    """
+    if conn.execute("SELECT 1 FROM settings WHERE key = 'schema_links_cascade'").fetchone():
+        return
+    definition = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'links'"
+    ).fetchone()
+    if definition and "ON UPDATE CASCADE" not in definition["sql"]:
+        conn.execute("UPDATE links SET location_code = NULL WHERE page_type = 'general'")
+        orphans = conn.execute(
+            """
+            UPDATE links SET location_code = NULL
+            WHERE location_code IS NOT NULL
+              AND location_code NOT IN (SELECT code FROM locations)
+            """
+        ).rowcount
+        if orphans:
+            LOGGER.warning(
+                "Cleared the location code on %s link(s) that pointed at a missing location. "
+                "Reassign them in the admin center.",
+                orphans,
+            )
+        conn.execute("ALTER TABLE links RENAME TO links_pre_cascade")
+        conn.execute(LINKS_TABLE_SQL.format(if_not_exists=""))
+        conn.execute(
+            f"INSERT INTO links({LINK_COLUMNS}) SELECT {LINK_COLUMNS} FROM links_pre_cascade"
+        )
+        conn.execute("DROP TABLE links_pre_cascade")
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES('schema_links_cascade', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
 
 
 def password_hash(password):
@@ -149,6 +273,20 @@ def password_matches(password, encoded):
         return False
 
 
+def unusable_password_hash():
+    """A well-formed hash no password can match.
+
+    Verifying against this costs the same as verifying a real one, so an unknown
+    username and a wrong password take equally long to reject.
+    """
+    salt = base64.b64encode(secrets.token_bytes(16)).decode()
+    digest = base64.b64encode(secrets.token_bytes(32)).decode()
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+UNUSABLE_PASSWORD_HASH = unusable_password_hash()
+
+
 def seed_initial_admin(conn):
     if conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone():
         return
@@ -161,131 +299,70 @@ def seed_initial_admin(conn):
 
 
 def setup_required():
-    conn = connect()
-    try:
-        return conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is None
-    finally:
-        conn.close()
+    """True only while nobody can possibly log in yet.
+
+    Active Directory counts as a usable login path, so an AD-only deployment
+    must never reopen the unauthenticated first-run page.
+    """
+    global _setup_complete
+    if _setup_complete:
+        return False
+    with db() as conn:
+        required = (
+            conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is None
+            and setting_values(conn, ["ad_enabled"]).get("ad_enabled") != "1"
+        )
+    if not required:
+        _setup_complete = True
+    return required
 
 
 def create_initial_admin(username, password):
+    global _setup_complete
     username = clean_required(username, "Username")
     encoded_password = password_hash(password or "")
-    conn = connect()
-    try:
+    with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone():
+        already_usable = (
+            conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is not None
+            or setting_values(conn, ["ad_enabled"]).get("ad_enabled") == "1"
+        )
+        if already_usable:
             raise ValueError("Initial setup has already been completed.")
         conn.execute(
             "INSERT INTO admin_users(username, password_hash, created_at) VALUES(?, ?, ?)",
             (username, encoded_password, int(time.time())),
         )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def seed_database(conn):
-    for index, (name, code) in enumerate(LOCATIONS, start=1):
-        conn.execute(
-            "INSERT INTO locations(name, code, sort_order) VALUES(?, ?, ?)",
-            (name, code, index),
-        )
-    for index, (name, url, group, description) in enumerate(GENERAL_LINKS, start=1):
-        conn.execute(
-            """
-            INSERT INTO links(page_type, link_type, name, url, description, group_name, sort_order)
-            VALUES('general', 'general', ?, ?, ?, ?, ?)
-            """,
-            (name, url, description, group, index),
-        )
-    order = 1
-    for location_name, code in LOCATIONS:
-        for name, host_template, description in STANDARD_LINKS:
-            host = host_template.replace("{code}", code)
-            conn.execute(
-                """
-                INSERT INTO links(page_type, location_code, link_type, name, url, description, group_name, sort_order)
-                VALUES('location', ?, 'standard', ?, ?, ?, 'Standard Services', ?)
-                """,
-                (code, name, url_for_host(host), description, order),
-            )
-            order += 1
-    for code, host, cluster in VHOSTS:
-        conn.execute(
-            """
-            INSERT INTO links(page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order)
-            VALUES('location', ?, 'vhost', ?, ?, ?, ?, ?, ?)
-            """,
-            (code, host.split(".")[0], url_for_host(host), f"Virtual host in {cluster}.", cluster, cluster, order),
-        )
-        order += 1
-
-
-def apply_seed_updates(conn):
-    update_key = "general_links_2026_07_02"
-    applied = conn.execute("SELECT value FROM settings WHERE key = ?", (update_key,)).fetchone()
-    if applied:
-        return
-    for index, (name, url, group, description) in enumerate(GENERAL_LINKS, start=1):
-        existing = conn.execute(
-            "SELECT id FROM links WHERE page_type = 'general' AND name = ?",
-            (name,),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """
-                UPDATE links
-                SET url = ?, group_name = ?, description = ?, link_type = 'general'
-                WHERE id = ?
-                """,
-                (url, group, description, existing["id"]),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO links(page_type, link_type, name, url, description, group_name, sort_order)
-                VALUES('general', 'general', ?, ?, ?, ?, ?)
-                """,
-                (name, url, description, group, index * 10),
-            )
-    conn.execute("INSERT INTO settings(key, value) VALUES(?, '1')", (update_key,))
-
-
-def url_for_host(host):
-    return host if host.startswith(("http://", "https://")) else f"https://{host}"
+    _setup_complete = True
+    return username
 
 
 def rows_to_dicts(rows):
     return [dict(row) for row in rows]
 
 
-def branding_payload(conn=None):
-    owns_connection = conn is None
-    conn = conn or connect()
-    try:
-        rows = conn.execute(
-            "SELECT key, value FROM settings WHERE key IN ('company_name', 'department_title', 'admin_title', 'logo_filename')"
-        ).fetchall()
-        saved = {row["key"]: row["value"] for row in rows}
-        branding = {
-            "company_name": saved.get("company_name", DEFAULT_BRANDING["company_name"]),
-            "department_title": saved.get("department_title", DEFAULT_BRANDING["department_title"]),
-            "admin_title": saved.get("admin_title", DEFAULT_BRANDING["admin_title"]),
-            "logo_url": DEFAULT_BRANDING["logo_url"],
-        }
-        if saved.get("logo_filename"):
-            branding["logo_url"] = f"/api/branding/logo?v={int((DATA_DIR / saved['logo_filename']).stat().st_mtime)}"
-        return branding
-    except FileNotFoundError:
-        return dict(DEFAULT_BRANDING)
-    finally:
-        if owns_connection:
-            conn.close()
+def branding_payload(conn):
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE key IN ('company_name', 'department_title', 'admin_title', 'logo_filename')"
+    ).fetchall()
+    saved = {row["key"]: row["value"] for row in rows}
+    branding = {
+        "company_name": saved.get("company_name", DEFAULT_BRANDING["company_name"]),
+        "department_title": saved.get("department_title", DEFAULT_BRANDING["department_title"]),
+        "admin_title": saved.get("admin_title", DEFAULT_BRANDING["admin_title"]),
+        "logo_url": DEFAULT_BRANDING["logo_url"],
+    }
+    if saved.get("logo_filename"):
+        logo_path = DATA_DIR / saved["logo_filename"]
+        try:
+            branding["logo_url"] = f"/api/branding/logo?v={int(logo_path.stat().st_mtime)}"
+        except OSError:
+            LOGGER.warning("Branding logo %s is missing; falling back to the default logo.", logo_path)
+    return branding
 
 
 def catalog_payload():
-    with connect() as conn:
+    with db() as conn:
         locations = rows_to_dicts(
             conn.execute(
                 "SELECT name, code FROM locations WHERE enabled = 1 ORDER BY sort_order, name"
@@ -306,7 +383,7 @@ def catalog_payload():
 
 
 def admin_payload():
-    with connect() as conn:
+    with db() as conn:
         locations = rows_to_dicts(
             conn.execute(
                 "SELECT id, name, code, sort_order, enabled FROM locations ORDER BY sort_order, name"
@@ -339,7 +416,7 @@ def auth_payload():
         "ad_enabled", "ad_server", "ad_port", "ad_ssl", "ad_domain",
         "ad_base_dn", "ad_group_dn", "ad_admin_users", "ad_admin_groups",
     ]
-    with connect() as conn:
+    with db() as conn:
         settings = setting_values(conn, keys)
         users = rows_to_dicts(
             conn.execute(
@@ -360,20 +437,31 @@ def auth_payload():
     }
 
 
+def authenticate(username, password):
+    """Return (source, canonical_username) on success, or None."""
+    local_username = authenticate_local(username, password)
+    if local_username:
+        return ("local", local_username)
+    if authenticate_ad(username, password):
+        return ("ad", normalize_account_name(username))
+    return None
+
+
 def authenticate_local(username, password):
-    conn = connect()
-    try:
+    with db() as conn:
         user = conn.execute(
-            "SELECT password_hash FROM admin_users WHERE username = ? AND enabled = 1",
+            "SELECT username, password_hash FROM admin_users WHERE username = ? AND enabled = 1",
             (username,),
         ).fetchone()
-    finally:
-        conn.close()
-    return bool(user and password_matches(password, user["password_hash"]))
+    # Always run the KDF, even for an unknown username, so response time does
+    # not reveal which accounts exist.
+    encoded = user["password_hash"] if user else UNUSABLE_PASSWORD_HASH
+    matched = password_matches(password, encoded)
+    return user["username"] if user and matched else None
 
 
 def authenticate_ad(username, password):
-    with connect() as conn:
+    with db() as conn:
         config = setting_values(
             conn, [
                 "ad_enabled", "ad_server", "ad_port", "ad_ssl", "ad_domain",
@@ -422,8 +510,20 @@ def authenticate_ad(username, password):
                     authorized = True
                     break
         connection.unbind()
+        if not authorized:
+            LOGGER.info(
+                "Active Directory bind succeeded for %r but the account is not an allowed admin user or group member.",
+                account_name,
+            )
         return authorized
     except Exception:
+        # Bad credentials look the same as a misconfigured server to the client,
+        # so log the real cause here instead of silently reporting "invalid
+        # username or password" forever.
+        LOGGER.warning(
+            "Active Directory authentication failed for %r against %s.",
+            username, server_name, exc_info=True,
+        )
         return False
 
 
@@ -450,7 +550,7 @@ def discover_domain_controller(domain):
         if ordered:
             return str(ordered[0].target).rstrip(".")
     except Exception:
-        pass
+        LOGGER.info("Could not discover a domain controller for %s via DNS SRV.", domain, exc_info=True)
     return domain
 
 
@@ -504,7 +604,7 @@ def csv_text(rows):
 
 def export_csv():
     rows = []
-    with connect() as conn:
+    with db() as conn:
         for location in conn.execute(
             "SELECT name, code, sort_order, enabled FROM locations ORDER BY name"
         ).fetchall():
@@ -541,24 +641,126 @@ def template_csv():
     ])
 
 
-def sign_session(expires):
-    message = str(expires).encode()
-    signature = hmac.new(SESSION_SECRET.encode(), message, hashlib.sha256).digest()
-    return f"{expires}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+def sign_session(source, username, issued, expires):
+    """Bind a session to one identity so it can be validated and revoked."""
+    payload = f"{SESSION_VERSION}|{source}|{issued}|{expires}|{username}"
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    signature = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+    return f"{encoded}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
 
 
-def valid_session(token):
+def parse_session(token):
     if not token or "." not in token:
-        return False
-    expires_text, signature = token.split(".", 1)
+        return None
+    encoded, signature = token.rsplit(".", 1)
+    expected = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+    expected_text = base64.urlsafe_b64encode(expected).decode().rstrip("=")
+    if not hmac.compare_digest(signature, expected_text):
+        return None
     try:
-        expires = int(expires_text)
-    except ValueError:
-        return False
-    if expires < int(time.time()):
-        return False
-    expected = sign_session(expires).split(".", 1)[1]
-    return hmac.compare_digest(signature, expected)
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        version, source, issued_text, expires_text, username = payload.split("|", 4)
+        issued, expires = int(issued_text), int(expires_text)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if version != SESSION_VERSION or source not in ("local", "ad") or not username:
+        return None
+    return {"source": source, "username": username, "issued": issued, "expires": expires}
+
+
+def resolve_session(token):
+    """Return the identity a token belongs to, or None if it is not usable."""
+    session = parse_session(token)
+    if not session:
+        return None
+    now = int(time.time())
+    if session["expires"] <= now or session["issued"] > now + 60:
+        return None
+    with db() as conn:
+        if session["issued"] < session_epoch(conn, session["source"], session["username"]):
+            return None
+        if session["source"] == "local":
+            active = conn.execute(
+                "SELECT 1 FROM admin_users WHERE username = ? AND enabled = 1",
+                (session["username"],),
+            ).fetchone()
+            if not active:
+                return None
+        elif setting_values(conn, ["ad_enabled"]).get("ad_enabled") != "1":
+            return None
+    return {"source": session["source"], "username": session["username"]}
+
+
+def session_epoch(conn, source, username):
+    row = conn.execute(
+        "SELECT epoch FROM session_epochs WHERE source = ? AND username = ?",
+        (source, username),
+    ).fetchone()
+    return row["epoch"] if row else 0
+
+
+def revoke_sessions(conn, source, username):
+    """Invalidate every token already issued to this identity."""
+    conn.execute(
+        "INSERT INTO session_epochs(source, username, epoch) VALUES(?, ?, ?) "
+        "ON CONFLICT(source, username) DO UPDATE SET epoch = excluded.epoch",
+        (source, username, int(time.time()) + 1),
+    )
+
+
+def throttle_key(kind, value):
+    return (kind, (value or "").strip().lower())
+
+
+def login_retry_after(username, client_ip):
+    """Seconds the caller must wait, or 0 when the attempt may proceed."""
+    now = int(time.time())
+    with _throttle_lock:
+        prune_throttle(now)
+        waits = [0]
+        for key in (throttle_key("user", username), throttle_key("ip", client_ip)):
+            entry = _throttle.get(key)
+            if entry:
+                waits.append(entry["locked_until"] - now)
+    return max(waits)
+
+
+def record_login_failure(username, client_ip):
+    now = int(time.time())
+    with _throttle_lock:
+        for kind, value in (("user", username), ("ip", client_ip)):
+            limits = LOGIN_LIMITS[kind]
+            key = throttle_key(kind, value)
+            entry = _throttle.setdefault(key, {"failures": [], "locked_until": 0})
+            entry["seen"] = now
+            entry["failures"] = [
+                stamp for stamp in entry["failures"] if stamp + limits["window"] > now
+            ]
+            entry["failures"].append(now)
+            if len(entry["failures"]) >= limits["max_failures"]:
+                entry["locked_until"] = now + limits["lockout"]
+                entry["failures"].clear()
+        prune_throttle(now)
+
+
+def record_login_success(username, client_ip):
+    with _throttle_lock:
+        _throttle.pop(throttle_key("user", username), None)
+        _throttle.pop(throttle_key("ip", client_ip), None)
+
+
+def prune_throttle(now):
+    longest_window = max(limits["window"] for limits in LOGIN_LIMITS.values())
+    stale = [
+        key for key, entry in _throttle.items()
+        if entry["locked_until"] <= now and entry.get("seen", 0) + longest_window <= now
+    ]
+    for key in stale:
+        del _throttle[key]
+    if len(_throttle) > THROTTLE_MAX_KEYS:
+        oldest = sorted(_throttle, key=lambda key: _throttle[key].get("seen", 0))
+        for key in oldest[: len(_throttle) - THROTTLE_MAX_KEYS]:
+            del _throttle[key]
 
 
 def cookie_value(header, name):
@@ -570,29 +772,84 @@ def cookie_value(header, name):
     return morsel.value if morsel else None
 
 
+def served_file(requested):
+    """Resolve a request path to a file on disk, or None if it is not served.
+
+    `SimpleHTTPRequestHandler.translate_path` is replaced rather than extended,
+    so this has to do its own containment checking: resolve the candidate, keep
+    it under the app directory, keep it out of the data directory, and require
+    it to be one of the handful of paths the browser actually needs.
+    """
+    root = APP_DIR.resolve()
+    try:
+        candidate = (root / requested.lstrip("/")).resolve()
+        data_dir = DATA_DIR.resolve()
+    except OSError:
+        return None
+    if not candidate.is_relative_to(root) or candidate.is_relative_to(data_dir):
+        return None
+    if requested in STATIC_FILES and candidate.is_file():
+        return candidate
+    if any(candidate.is_relative_to(root / name) for name in STATIC_DIRS) and candidate.is_file():
+        return candidate
+    return None
+
+
 class AppHandler(SimpleHTTPRequestHandler):
-    server_version = f"QuickLinks/{APP_VERSION}"
+    server_version = "QuickLinks"
+    sys_version = ""
 
     def translate_path(self, path):
-        parsed_path = urlparse(path).path
-        if parsed_path == "/":
-            parsed_path = "/index.html"
-        if parsed_path == "/admin":
-            parsed_path = "/admin.html"
-        return str(APP_DIR / parsed_path.lstrip("/"))
+        requested = unquote(urlparse(path).path)
+        if requested in ("", "/"):
+            requested = "/index.html"
+        elif requested == "/admin":
+            requested = "/admin.html"
+        allowed = served_file(requested)
+        # Returning a path that cannot exist makes the base handler answer 404
+        # without disclosing whether the real target is there.
+        return str(allowed) if allowed else str(APP_DIR / UNSERVABLE)
 
     def end_headers(self):
         self.send_header("X-QuickLinks-Creator", PRODUCT_NOTICE["creator"])
         self.send_header("X-QuickLinks-Notice", PRODUCT_NOTICE["header_notice"])
-        self.send_header("X-QuickLinks-Version", APP_VERSION)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; frame-ancestors 'self'",
+            "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; "
+            "script-src 'self'; connect-src 'self'; base-uri 'self'; "
+            "object-src 'none'; form-action 'self'; frame-ancestors 'self'",
         )
         super().end_headers()
+
+    def version_string(self):
+        # Deliberately omits the release and the Python version.
+        return self.server_version
+
+    def client_ip(self):
+        if TRUST_PROXY:
+            headers = getattr(self, "headers", None)
+            forwarded = (headers.get("X-Forwarded-For", "") if headers else "").strip()
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+        address = getattr(self, "client_address", None)
+        return address[0] if address else "unknown"
+
+    def cookie_is_secure(self):
+        if COOKIE_SECURE in ("1", "true", "yes"):
+            return True
+        if COOKIE_SECURE in ("0", "false", "no"):
+            return False
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        return proto == "https"
+
+    def session_cookie(self, token, max_age):
+        parts = [f"{SESSION_COOKIE}={token}", "HttpOnly", "SameSite=Lax", "Path=/", f"Max-Age={max_age}"]
+        if self.cookie_is_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -633,12 +890,17 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/session":
             self.send_json({"authenticated": self.is_admin(), "setup_required": setup_required()})
             return
+        if parsed.path.startswith("/api/"):
+            self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
+            return
         super().do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if not self.body_within_limit():
+            return
         if parsed.path == "/api/login":
-            self.login()
+            self.safe_write(self.login)
             return
         if parsed.path == "/api/setup":
             self.safe_write(self.initial_setup)
@@ -646,37 +908,24 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/logout":
             self.logout()
             return
-        if parsed.path == "/api/locations":
-            if not self.require_admin():
-                return
-            self.safe_write(self.save_location)
+        routes = {
+            "/api/locations": self.save_location,
+            "/api/links": self.save_link,
+            "/api/branding": self.save_branding,
+            "/api/import": self.import_catalog,
+            "/api/admin-users": self.save_admin_user,
+            "/api/auth-config": self.save_auth_config,
+        }
+        action = routes.get(parsed.path)
+        if not action:
+            self.drain_body()
+            self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
             return
-        if parsed.path == "/api/links":
-            if not self.require_admin():
-                return
-            self.safe_write(self.save_link)
+        if not self.is_admin():
+            self.drain_body()
+            self.send_json({"error": "Admin login required."}, HTTPStatus.UNAUTHORIZED)
             return
-        if parsed.path == "/api/branding":
-            if not self.require_admin():
-                return
-            self.safe_write(self.save_branding)
-            return
-        if parsed.path == "/api/import":
-            if not self.require_admin():
-                return
-            self.safe_write(self.import_catalog)
-            return
-        if parsed.path == "/api/admin-users":
-            if not self.require_admin():
-                return
-            self.safe_write(self.save_admin_user)
-            return
-        if parsed.path == "/api/auth-config":
-            if not self.require_admin():
-                return
-            self.safe_write(self.save_auth_config)
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self.safe_write(action)
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
@@ -691,48 +940,64 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path.startswith("/api/admin-users/"):
             self.safe_write(lambda: self.delete_admin_user(parsed.path.rsplit("/", 1)[-1]))
             return
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
 
     def login(self):
         body = self.read_json()
         username = (body.get("username") or "").strip()
         password = body.get("password", "")
-        if not (authenticate_local(username, password) or authenticate_ad(username, password)):
+        client = self.client_ip()
+
+        wait = login_retry_after(username, client)
+        if wait > 0:
+            LOGGER.warning("Rejected a throttled login for %r from %s.", username, client)
+            self.send_json(
+                {"error": f"Too many failed attempts. Try again in {wait} seconds."},
+                HTTPStatus.TOO_MANY_REQUESTS,
+                extra_headers=(("Retry-After", str(wait)),),
+            )
+            return
+
+        identity = authenticate(username, password)
+        if not identity:
+            record_login_failure(username, client)
+            LOGGER.info("Failed login for %r from %s.", username, client)
             self.send_json({"error": "Invalid username or password."}, HTTPStatus.UNAUTHORIZED)
             return
-        expires = int(time.time()) + SESSION_MAX_AGE
-        token = sign_session(expires)
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/json")
-        self.send_header(
-            "Set-Cookie",
-            f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE}",
-        )
-        self.end_headers()
-        self.wfile.write(json.dumps({"authenticated": True}).encode())
+
+        record_login_success(username, client)
+        source, canonical = identity
+        LOGGER.info("Successful %s login for %r from %s.", source, canonical, client)
+        self.send_session(HTTPStatus.OK, {"authenticated": True}, source, canonical)
 
     def initial_setup(self):
         body = self.read_json()
-        create_initial_admin(body.get("username"), body.get("password"))
-        expires = int(time.time()) + SESSION_MAX_AGE
-        token = sign_session(expires)
-        response = json.dumps({"authenticated": True, "setup_required": False}).encode()
-        self.send_response(HTTPStatus.CREATED)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response)))
-        self.send_header(
-            "Set-Cookie",
-            f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE}",
+        username = create_initial_admin(body.get("username"), body.get("password"))
+        self.send_session(
+            HTTPStatus.CREATED,
+            {"authenticated": True, "setup_required": False},
+            "local",
+            username,
         )
-        self.end_headers()
-        self.wfile.write(response)
+
+    def send_session(self, status, payload, source, username):
+        issued = int(time.time())
+        token = sign_session(source, username, issued, issued + SESSION_MAX_AGE)
+        self.send_json(
+            payload,
+            status,
+            extra_headers=(("Set-Cookie", self.session_cookie(token, SESSION_MAX_AGE)),),
+        )
 
     def logout(self):
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
-        self.end_headers()
-        self.wfile.write(json.dumps({"authenticated": False}).encode())
+        identity = self.identity()
+        if identity:
+            with db() as conn:
+                revoke_sessions(conn, identity["source"], identity["username"])
+        self.send_json(
+            {"authenticated": False},
+            extra_headers=(("Set-Cookie", self.session_cookie("", 0)),),
+        )
 
     def save_admin_user(self):
         body = self.read_json()
@@ -740,9 +1005,11 @@ class AppHandler(SimpleHTTPRequestHandler):
         username = clean_required(body.get("username"), "Username")
         password = body.get("password") or ""
         enabled = 1 if body.get("enabled", True) else 0
-        with connect() as conn:
+        with db() as conn:
             if user_id:
-                existing = conn.execute("SELECT id FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+                existing = conn.execute(
+                    "SELECT username FROM admin_users WHERE id = ?", (user_id,)
+                ).fetchone()
                 if not existing:
                     raise ValueError("Local administrator not found.")
                 if password:
@@ -755,6 +1022,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                         "UPDATE admin_users SET username = ?, enabled = ? WHERE id = ?",
                         (username, enabled, user_id),
                     )
+                renamed = username.lower() != existing["username"].lower()
+                if password or renamed or not enabled:
+                    revoke_sessions(conn, "local", existing["username"])
+                    if renamed:
+                        revoke_sessions(conn, "local", username)
             else:
                 conn.execute(
                     "INSERT INTO admin_users(username, password_hash, enabled, created_at) VALUES(?, ?, ?, ?)",
@@ -763,18 +1035,21 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json(auth_payload())
 
     def delete_admin_user(self, raw_id):
-        user_id = int(raw_id)
-        with connect() as conn:
+        user_id = clean_int(raw_id, 0)
+        with db() as conn:
             enabled_count = conn.execute(
                 "SELECT COUNT(*) AS count FROM admin_users WHERE enabled = 1"
             ).fetchone()["count"]
             target = conn.execute(
-                "SELECT enabled FROM admin_users WHERE id = ?", (user_id,)
+                "SELECT username, enabled FROM admin_users WHERE id = ?", (user_id,)
             ).fetchone()
+            if not target:
+                raise ValueError("Local administrator not found.")
             ad_enabled = setting_values(conn, ["ad_enabled"]).get("ad_enabled") == "1"
-            if target and target["enabled"] and enabled_count <= 1 and not ad_enabled:
+            if target["enabled"] and enabled_count <= 1 and not ad_enabled:
                 raise ValueError("Keep one enabled local administrator until Active Directory is enabled.")
             conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+            revoke_sessions(conn, "local", target["username"])
         self.send_json(auth_payload())
 
     def save_auth_config(self):
@@ -795,7 +1070,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             domain_to_base_dn(values["ad_domain"])
             if not values["ad_admin_users"] and not values["ad_admin_groups"]:
                 raise ValueError("Add at least one AD admin user or admin group.")
-        with connect() as conn:
+        with db() as conn:
             for key, value in values.items():
                 conn.execute(
                     "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -807,9 +1082,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         body = self.read_json()
         raw_csv = body.get("csv") or ""
         mode = body.get("mode") if body.get("mode") in ("merge", "replace") else "merge"
-        if len(raw_csv.encode()) > 5 * 1024 * 1024:
+        if len(raw_csv.encode()) > MAX_CSV_BYTES:
             raise ValueError("CSV files must be smaller than 5 MB.")
-        reader = csv.DictReader(io.StringIO(raw_csv.lstrip("\ufeff")))
+        reader = csv.DictReader(io.StringIO(raw_csv.lstrip(chr(0xFEFF))))
         if not reader.fieldnames or any(field not in reader.fieldnames for field in CSV_FIELDS):
             raise ValueError("The CSV columns do not match the provided template.")
         locations, links = [], []
@@ -829,14 +1104,16 @@ class AppHandler(SimpleHTTPRequestHandler):
                 if page_type not in ("general", "location"):
                     raise ValueError(f"Row {line_number}: page_type must be general or location.")
                 location_code = (row.get("location_code") or "").strip().lower() or None
-                if page_type == "location" and not location_code:
+                if page_type == "general":
+                    location_code = None
+                elif not location_code:
                     raise ValueError(f"Row {line_number}: location links require a location_code.")
                 links.append({
                     "page_type": page_type,
                     "location_code": location_code,
                     "link_type": (row.get("link_type") or ("general" if page_type == "general" else "standard")).strip(),
                     "name": clean_required(row.get("name"), f"Link name on row {line_number}"),
-                    "url": clean_required(row.get("url"), f"URL on row {line_number}"),
+                    "url": clean_url(row.get("url"), f"URL on row {line_number}"),
                     "description": (row.get("description") or "").strip(),
                     "group_name": clean_required(row.get("group_name"), f"Group on row {line_number}"),
                     "cluster": (row.get("cluster") or "").strip(),
@@ -847,7 +1124,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 raise ValueError(f"Row {line_number}: record_type must be location or link.")
 
         available_codes = {location["code"] for location in locations}
-        with connect() as conn:
+        with db() as conn:
             if mode == "merge":
                 available_codes.update(
                     row["code"] for row in conn.execute("SELECT code FROM locations").fetchall()
@@ -902,20 +1179,23 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def save_location(self):
         body = self.read_json()
-        location_id = int(body.get("id") or 0)
+        location_id = clean_int(body.get("id"), 0)
         name = clean_required(body.get("name"), "Location name")
         code = clean_required(body.get("code"), "Location code").lower()
         sort_order = clean_int(body.get("sort_order"), 0)
         enabled = 1 if body.get("enabled", True) else 0
-        with connect() as conn:
+        with db() as conn:
             if location_id:
-                old = conn.execute("SELECT code FROM locations WHERE id = ?", (location_id,)).fetchone()
+                if not conn.execute(
+                    "SELECT 1 FROM locations WHERE id = ?", (location_id,)
+                ).fetchone():
+                    raise ValueError("Location not found.")
+                # The location foreign key cascades, so renaming a code carries
+                # its links along automatically.
                 conn.execute(
                     "UPDATE locations SET name = ?, code = ?, sort_order = ?, enabled = ? WHERE id = ?",
                     (name, code, sort_order, enabled, location_id),
                 )
-                if old and old["code"] != code:
-                    conn.execute("UPDATE links SET location_code = ? WHERE location_code = ?", (code, old["code"]))
             else:
                 conn.execute(
                     "INSERT INTO locations(name, code, sort_order, enabled) VALUES(?, ?, ?, ?)",
@@ -925,22 +1205,27 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def save_link(self):
         body = self.read_json()
-        link_id = int(body.get("id") or 0)
-        page_type = body.get("page_type") if body.get("page_type") in ("general", "location") else "general"
-        location_code = (body.get("location_code") or "").strip() or None
-        if page_type == "location" and not location_code:
-            self.send_json({"error": "Choose a location for this link."}, HTTPStatus.BAD_REQUEST)
-            return
+        link_id = clean_int(body.get("id"), 0)
+        page_type = (body.get("page_type") or "").strip().lower()
+        if page_type not in ("general", "location"):
+            raise ValueError("Page type must be general or location.")
+        location_code = (body.get("location_code") or "").strip().lower() or None
+        if page_type == "general":
+            location_code = None
+        elif not location_code:
+            raise ValueError("Choose a location for this link.")
         link_type = (body.get("link_type") or "standard").strip()
         name = clean_required(body.get("name"), "Link name")
-        url = clean_required(body.get("url"), "URL")
+        url = clean_url(body.get("url"), "URL")
         description = (body.get("description") or "").strip()
         group_name = clean_required(body.get("group_name"), "Group")
         cluster = (body.get("cluster") or "").strip()
         sort_order = clean_int(body.get("sort_order"), 0)
         enabled = 1 if body.get("enabled", True) else 0
-        with connect() as conn:
+        with db() as conn:
             if link_id:
+                if not conn.execute("SELECT 1 FROM links WHERE id = ?", (link_id,)).fetchone():
+                    raise ValueError("Link not found.")
                 conn.execute(
                     """
                     UPDATE links
@@ -968,7 +1253,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         logo_data = body.get("logo_data")
         remove_logo = bool(body.get("remove_logo"))
 
-        with connect() as conn:
+        with db() as conn:
             for key, value in (
                 ("company_name", company_name),
                 ("department_title", department_title),
@@ -992,7 +1277,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     image_bytes = base64.b64decode(encoded, validate=True)
                 except (ValueError, KeyError):
                     raise ValueError("Choose a PNG, JPG, or WebP logo.")
-                if len(image_bytes) > 5 * 1024 * 1024:
+                if len(image_bytes) > MAX_LOGO_BYTES:
                     raise ValueError("The logo must be smaller than 5 MB.")
                 if existing:
                     (DATA_DIR / existing["value"]).unlink(missing_ok=True)
@@ -1005,14 +1290,16 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json(admin_payload())
 
     def send_branding_logo(self):
-        with connect() as conn:
+        with db() as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = 'logo_filename'").fetchone()
         if not row:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self.send_json({"error": "No logo has been uploaded."}, HTTPStatus.NOT_FOUND)
             return
-        logo_path = DATA_DIR / row["value"]
-        if not logo_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND)
+        # The stored name is always one this server wrote, but resolve it anyway
+        # so a tampered settings row cannot read outside the data directory.
+        logo_path = (DATA_DIR / row["value"]).resolve()
+        if not logo_path.is_relative_to(DATA_DIR.resolve()) or not logo_path.is_file():
+            self.send_json({"error": "No logo has been uploaded."}, HTTPStatus.NOT_FOUND)
             return
         body = logo_path.read_bytes()
         self.send_response(HTTPStatus.OK)
@@ -1023,24 +1310,27 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def delete_location(self, raw_id):
-        location_id = int(raw_id)
-        with connect() as conn:
+        location_id = clean_int(raw_id, 0)
+        with db() as conn:
             row = conn.execute("SELECT code FROM locations WHERE id = ?", (location_id,)).fetchone()
             if not row:
-                self.send_json({"error": "Location not found."}, HTTPStatus.NOT_FOUND)
-                return
+                raise ValueError("Location not found.")
+            # Redundant while the foreign key cascades, but keeps the intent
+            # explicit and correct even if enforcement is ever disabled.
             conn.execute("DELETE FROM links WHERE location_code = ?", (row["code"],))
             conn.execute("DELETE FROM locations WHERE id = ?", (location_id,))
         self.send_json(admin_payload())
 
     def delete_link(self, raw_id):
-        with connect() as conn:
-            conn.execute("DELETE FROM links WHERE id = ?", (int(raw_id),))
+        with db() as conn:
+            conn.execute("DELETE FROM links WHERE id = ?", (clean_int(raw_id, 0),))
         self.send_json(admin_payload())
 
+    def identity(self):
+        return resolve_session(cookie_value(self.headers.get("Cookie"), SESSION_COOKIE))
+
     def is_admin(self):
-        token = cookie_value(self.headers.get("Cookie"), SESSION_COOKIE)
-        return valid_session(token)
+        return self.identity() is not None
 
     def require_admin(self):
         if self.is_admin():
@@ -1048,12 +1338,50 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"error": "Admin login required."}, HTTPStatus.UNAUTHORIZED)
         return False
 
+    def body_within_limit(self):
+        """Reject an oversized body before any of it is read into memory."""
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.send_json(
+                {"error": "A valid Content-Length header is required."},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return False
+        if length > MAX_REQUEST_BODY:
+            self.close_connection = True
+            self.send_json(
+                {"error": "Request body is too large."},
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+            return False
+        return True
+
+    def drain_body(self):
+        """Read and discard a request body this handler will not parse.
+
+        Answering a POST without consuming its body leaves unread bytes in the
+        socket. Closing in that state sends an RST rather than a FIN, which can
+        destroy the response before the client has read it -- so an expired
+        session would surface as a connection reset instead of a clean 401.
+        """
+        remaining = max(0, min(clean_int(self.headers.get("Content-Length", "0"), 0), MAX_REQUEST_BODY))
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def read_json(self):
-        length = int(self.headers.get("Content-Length", "0"))
+        length = clean_int(self.headers.get("Content-Length", "0"), 0)
+        length = max(0, min(length, MAX_REQUEST_BODY))
         raw = self.rfile.read(length) if length else b"{}"
         try:
             return json.loads(raw.decode())
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
 
     def safe_write(self, action):
@@ -1062,14 +1390,29 @@ class AppHandler(SimpleHTTPRequestHandler):
         except ValueError as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except sqlite3.IntegrityError as error:
-            message = "That code or value already exists." if "UNIQUE" in str(error) else str(error)
+            text = str(error)
+            if "FOREIGN KEY" in text:
+                message = "That location code does not exist."
+            elif "UNIQUE" in text:
+                message = "That code or value already exists."
+            else:
+                message = text
             self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
+        except sqlite3.OperationalError as error:
+            LOGGER.warning("Database unavailable for %s %s: %s", self.command, self.path, error)
+            self.send_json(
+                {"error": "The database is busy. Try that again in a moment."},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
 
-    def send_json(self, payload, status=HTTPStatus.OK):
+    def send_json(self, payload, status=HTTPStatus.OK, extra_headers=()):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in extra_headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1079,8 +1422,12 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        LOGGER.info("%s - %s", self.client_ip(), format % args)
 
 
 def clean_required(value, label):
@@ -1088,6 +1435,16 @@ def clean_required(value, label):
     if not cleaned:
         raise ValueError(f"{label} is required.")
     return cleaned
+
+
+def clean_url(value, label="URL"):
+    """Reject URL schemes that would run script from a link card."""
+    url = clean_required(value, label)
+    probe = "".join(character for character in url if character.isprintable() and not character.isspace())
+    scheme = probe.partition(":")[0].lower() if ":" in probe else ""
+    if scheme in BLOCKED_URL_SCHEMES:
+        raise ValueError(f"{label} may not use the {scheme}: scheme.")
+    return url
 
 
 def clean_int(value, default):
@@ -1111,10 +1468,14 @@ def normalize_multiline(value):
 
 
 def main():
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     ensure_database()
     port = int(os.environ.get("PORT", "6969"))
     host = os.environ.get("HOST", "0.0.0.0")
-    print(f"QuickLinks listening on http://{host}:{port}")
+    LOGGER.info("QuickLinks %s listening on http://%s:%s", APP_VERSION, host, port)
     ThreadingHTTPServer((host, port), AppHandler).serve_forever()
 
 
