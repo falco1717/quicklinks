@@ -1,0 +1,74 @@
+name: Publish
+
+# Publishes jordanmfarmer/quicklinks. Pushing a tag that matches VERSION is the
+# normal route; workflow_dispatch is there for re-running a failed publish.
+on:
+  push:
+    tags:
+      - "20*.*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: jordanmfarmer/quicklinks
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - run: pip install -r requirements.txt
+
+      # Never publish an image whose tests have not run.
+      - run: python -m unittest discover -s tests -v
+
+      - id: release
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(cat VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION $version." >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          # Keeps the tag to a single manifest entry, matching the recent
+          # releases rather than adding an unknown/unknown attestation row.
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.release.outputs.version }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Published"
+            echo
+            echo "- \`$IMAGE:${{ steps.release.outputs.version }}\`"
+            echo "- \`$IMAGE:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

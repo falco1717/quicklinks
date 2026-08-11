@@ -2,6 +2,15 @@
 
 Keep entries public-ready: completed work, decisions and rationale, useful failed approaches, validation, and durable lessons.
 
+## 2026-08-11 (image publishing)
+
+- Added `.github/workflows/publish.yml` so releases are built and pushed from CI rather than a workstation. This machine has no Docker, podman, or nerdctl and no stored registry credentials, and publishing to the Docker Hub namespace requires the account's own token, so a local build was not an option regardless of tooling.
+- CI publishing is the better arrangement anyway: the image provenance is tied to a tagged commit, the unit tests gate the push, and the release stops depending on whichever machine happens to have Docker installed.
+- The workflow runs the test suite before logging in, so a failing suite cannot produce a published image. It also refuses to publish when a pushed tag does not match the `VERSION` file, which is the mistake most likely to happen by hand.
+- `provenance: false` keeps each tag to a single manifest entry. The `1.0.x` and `2026.07.09.001` tags carry an extra `unknown/unknown` attestation row from an earlier build method; the recent ones do not, and this matches the recent ones.
+- Held to `linux/amd64` to match every release since `2026.08.09.001`. `2026.07.09.001` and `1.0.2` were also built for `linux/arm64`; adding it back is one line in `platforms:` if ARM hosts need it, and the image is pure Python so the cross build is cheap.
+- Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. These have to be added by the account owner; an agent should not be handling a registry token.
+
 ## 2026-08-11 (Entra ID)
 
 - Added Microsoft Entra ID as a third authentication source, on the OIDC authorization code flow with PKCE. Rejected the resource owner password credentials grant even though it would have dropped straight into the existing username/password form: it does not support MFA or Conditional Access and is blocked in many tenants, which would have made the feature useless in exactly the environments that ask for it.

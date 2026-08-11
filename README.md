@@ -89,6 +89,20 @@ python -m unittest discover -s tests -v
 docker build -t quicklinks:local .
 ```
 
+## Releasing
+
+Images are built and pushed by the `Publish` workflow, not from a workstation, so the published image always corresponds to a tagged commit and always had its tests run first.
+
+One-time setup: add two repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub access token with Read/Write scope, created under Docker Hub → Account settings → Personal access tokens).
+
+To cut a release, bump `VERSION` using the `YYYY.MM.DD.NNN` scheme, add a changelog entry, then tag the commit with exactly the same value:
+
+```bash
+git tag 2026.08.11.002 && git push origin 2026.08.11.002
+```
+
+The workflow refuses to publish when the tag and `VERSION` disagree. It pushes `jordanmfarmer/quicklinks:<version>` and moves `:latest`. A failed publish can be re-run from the Actions tab without retagging.
+
 ## Upgrades and backup
 
 Pull the new image and recreate the container. Schema updates are applied at startup without replacing existing links or administrators.
