@@ -45,7 +45,7 @@ Two separate directories: the application, and the data. Keeping data out of the
 New-Item -ItemType Directory -Force -Path 'C:\Program Files\QuickLinks' | Out-Null
 New-Item -ItemType Directory -Force -Path 'C:\ProgramData\QuickLinks' | Out-Null
 
-$release = '2026.08.11.003'
+$release = '2026.08.11.004'   # check the releases page for the current version
 $zip = "$env:TEMP\quicklinks.zip"
 Invoke-WebRequest "https://github.com/falco1717/quicklinks/archive/refs/tags/$release.zip" -OutFile $zip
 Expand-Archive $zip -DestinationPath $env:TEMP -Force

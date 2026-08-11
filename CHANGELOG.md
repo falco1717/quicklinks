@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026.08.11.004
 
 - Removed the Saltbox integration documentation and the external deployment role it referenced. Unattended provisioning through `ADMIN_USERNAME` and `ADMIN_PASSWORD` is unchanged and still supported; only the Saltbox-specific packaging and instructions are gone.
 - Added `docs/running-on-windows.md`: running QuickLinks natively on Windows as a boot-time scheduled task, with a wrapper script that keeps the session secret out of machine-wide environment variables, data-directory ACLs, firewall and reverse-proxy notes, and NSSM as an alternative.
