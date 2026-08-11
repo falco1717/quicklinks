@@ -10,13 +10,17 @@ import secrets
 import sqlite3
 import time
 import mimetypes
+import re
+import ssl
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from threading import Lock
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -88,6 +92,22 @@ BLOCKED_URL_SCHEMES = {"javascript", "data", "vbscript", "blob", "about", "files
 MAX_REQUEST_BODY = 12 * 1024 * 1024
 MAX_CSV_BYTES = 5 * 1024 * 1024
 MAX_LOGO_BYTES = 5 * 1024 * 1024
+MAX_TOKEN_RESPONSE = 256 * 1024
+
+# Microsoft Entra ID, via the OIDC authorization code flow with PKCE. The
+# redirect flow is what supports MFA and Conditional Access; the older
+# username/password grant does not, and many tenants block it outright.
+ENTRA_AUTHORITY = "https://login.microsoftonline.com"
+ENTRA_SCOPE = "openid profile email"
+ENTRA_FLOW_COOKIE = "quicklinks_entra_flow"
+ENTRA_FLOW_MAX_AGE = 600
+ENTRA_CLOCK_SKEW = 120
+ENTRA_SETTING_KEYS = [
+    "entra_enabled", "entra_tenant_id", "entra_client_id", "entra_client_secret",
+    "entra_redirect_uri", "entra_admin_users", "entra_admin_groups", "entra_admin_roles",
+]
+GUID_PATTERN = re.compile(r"\A[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\Z")
+AUTH_SOURCES = ("local", "ad", "entra")
 
 # Per-username lockout is strict because it protects one account. The per-IP
 # limit is loose so that a shared reverse-proxy address cannot lock out every
@@ -310,7 +330,7 @@ def setup_required():
     with db() as conn:
         required = (
             conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is None
-            and setting_values(conn, ["ad_enabled"]).get("ad_enabled") != "1"
+            and not external_auth_enabled(conn)
         )
     if not required:
         _setup_complete = True
@@ -325,7 +345,7 @@ def create_initial_admin(username, password):
         conn.execute("BEGIN IMMEDIATE")
         already_usable = (
             conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is not None
-            or setting_values(conn, ["ad_enabled"]).get("ad_enabled") == "1"
+            or external_auth_enabled(conn)
         )
         if already_usable:
             raise ValueError("Initial setup has already been completed.")
@@ -411,6 +431,20 @@ def setting_values(conn, keys):
     return {row["key"]: row["value"] for row in rows}
 
 
+def save_setting(conn, key, value):
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def external_auth_enabled(conn):
+    """True when a directory can authenticate administrators without a local account."""
+    values = setting_values(conn, ["ad_enabled", "entra_enabled"])
+    return values.get("ad_enabled") == "1" or values.get("entra_enabled") == "1"
+
+
 def auth_payload():
     keys = [
         "ad_enabled", "ad_server", "ad_port", "ad_ssl", "ad_domain",
@@ -418,6 +452,7 @@ def auth_payload():
     ]
     with db() as conn:
         settings = setting_values(conn, keys)
+        entra = entra_config(conn)
         users = rows_to_dicts(
             conn.execute(
                 "SELECT id, username, enabled, created_at FROM admin_users ORDER BY username"
@@ -425,6 +460,17 @@ def auth_payload():
         )
     return {
         "users": users,
+        # The client secret is never returned, only whether one is stored.
+        "entra": {
+            "enabled": entra["enabled"],
+            "tenant_id": entra["tenant_id"],
+            "client_id": entra["client_id"],
+            "redirect_uri": entra["redirect_uri"],
+            "admin_users": entra["admin_users"],
+            "admin_groups": entra["admin_groups"],
+            "admin_roles": entra["admin_roles"],
+            "client_secret_set": bool(entra["client_secret"]),
+        },
         "ad": {
             "enabled": settings.get("ad_enabled") == "1",
             "server": settings.get("ad_server", ""),
@@ -593,6 +639,216 @@ def user_in_group(connection, base_dn, account_name, group_dn, subtree, escape_f
     return connection.search(base_dn, search_filter, search_scope=subtree, attributes=["distinguishedName"])
 
 
+def entra_config(conn):
+    values = setting_values(conn, ENTRA_SETTING_KEYS)
+    return {
+        "enabled": values.get("entra_enabled") == "1",
+        "tenant_id": values.get("entra_tenant_id", ""),
+        "client_id": values.get("entra_client_id", ""),
+        "client_secret": values.get("entra_client_secret", ""),
+        "redirect_uri": values.get("entra_redirect_uri", ""),
+        "admin_users": values.get("entra_admin_users", ""),
+        "admin_groups": values.get("entra_admin_groups", ""),
+        "admin_roles": values.get("entra_admin_roles", ""),
+    }
+
+
+def entra_ready(config):
+    """True when Entra login is switched on and completely configured."""
+    return bool(
+        config["enabled"] and config["tenant_id"] and config["client_id"]
+        and config["client_secret"] and config["redirect_uri"]
+    )
+
+
+def entra_login_available():
+    with db() as conn:
+        return entra_ready(entra_config(conn))
+
+
+def validate_entra_settings(values):
+    if not GUID_PATTERN.match(values["entra_tenant_id"]):
+        raise ValueError("Directory (tenant) ID must be the GUID shown in the Entra portal.")
+    if not GUID_PATTERN.match(values["entra_client_id"]):
+        raise ValueError("Application (client) ID must be the GUID shown in the Entra portal.")
+    if not values["entra_client_secret"]:
+        raise ValueError("A client secret is required to enable Microsoft Entra ID login.")
+    parsed = urlparse(values["entra_redirect_uri"])
+    on_loopback = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+    if parsed.scheme != "https" and not on_loopback:
+        raise ValueError("The redirect URI must use https, or http on localhost for testing.")
+    if not parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError("Enter the redirect URI exactly as registered, with no query string.")
+    if not parsed.path.endswith("/api/auth/entra/callback"):
+        raise ValueError("The redirect URI must end with /api/auth/entra/callback.")
+    if not any(
+        values[key] for key in ("entra_admin_users", "entra_admin_groups", "entra_admin_roles")
+    ):
+        raise ValueError("Add at least one Entra admin user, group, or app role.")
+
+
+def sign_payload(payload):
+    """Sign a short-lived cookie payload with the session secret."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(body).decode().rstrip("=")
+    signature = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+    return f"{encoded}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+
+
+def verify_payload(token):
+    if not token or "." not in token:
+        return None
+    encoded, signature = token.rsplit(".", 1)
+    expected = base64.urlsafe_b64encode(
+        hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+    ).decode().rstrip("=")
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or clean_int(payload.get("exp"), 0) <= int(time.time()):
+        return None
+    return payload
+
+
+def pkce_pair():
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    return verifier, challenge.decode().rstrip("=")
+
+
+def entra_authorize_url(config, state, nonce, challenge):
+    query = urlencode({
+        "client_id": config["client_id"],
+        "response_type": "code",
+        "redirect_uri": config["redirect_uri"],
+        "response_mode": "query",
+        "scope": ENTRA_SCOPE,
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    return f"{ENTRA_AUTHORITY}/{quote(config['tenant_id'])}/oauth2/v2.0/authorize?{query}"
+
+
+def exchange_entra_code(config, code, verifier):
+    """Redeem an authorization code at the tenant's token endpoint."""
+    body = urlencode({
+        "client_id": config["client_id"],
+        "client_secret": config["client_secret"],
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": config["redirect_uri"],
+        "code_verifier": verifier,
+        "scope": ENTRA_SCOPE,
+    }).encode()
+    url = f"{ENTRA_AUTHORITY}/{quote(config['tenant_id'])}/oauth2/v2.0/token"
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=15, context=ssl.create_default_context()
+        ) as response:
+            return json.loads(response.read(MAX_TOKEN_RESPONSE).decode())
+    except urllib.error.HTTPError as error:
+        detail = error.read(MAX_TOKEN_RESPONSE).decode("utf-8", "replace")[:500]
+        LOGGER.warning("Entra token exchange rejected with %s: %s", error.code, detail)
+        raise ValueError("Microsoft rejected the sign-in. Check the client secret and redirect URI.")
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        LOGGER.warning("Entra token exchange failed: %s", error)
+        raise ValueError("Could not reach Microsoft to complete the sign-in.")
+
+
+def decode_jwt_claims(token):
+    parts = (token or "").split(".")
+    if len(parts) != 3:
+        raise ValueError("Microsoft did not return a readable ID token.")
+    try:
+        return json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("Microsoft did not return a readable ID token.")
+
+
+def validate_entra_claims(claims, config, nonce, now=None):
+    """Check an ID token that came straight back from the token endpoint.
+
+    The signature is deliberately not verified, and does not need to be: this
+    process opened the TLS connection to login.microsoftonline.com itself and
+    read the token off that channel, which OIDC Core 3.1.3.7 allows to stand in
+    for signature validation on the authorization code flow. No token is ever
+    accepted from the browser -- that is the case that would require fetching
+    and checking against the tenant's JWKS.
+    """
+    if not isinstance(claims, dict):
+        raise ValueError("Microsoft did not return a readable ID token.")
+    now = now if now is not None else int(time.time())
+    tenant = str(claims.get("tid", ""))
+    if not GUID_PATTERN.match(tenant) or tenant.lower() != config["tenant_id"].lower():
+        raise ValueError("The sign-in came from a different Microsoft tenant.")
+    if claims.get("iss") != f"{ENTRA_AUTHORITY}/{tenant}/v2.0":
+        raise ValueError("The ID token issuer was not recognised.")
+    audience = claims.get("aud")
+    audiences = audience if isinstance(audience, list) else [audience]
+    if config["client_id"] not in audiences:
+        raise ValueError("The ID token was issued for a different application.")
+    token_nonce = str(claims.get("nonce", ""))
+    if not nonce or not hmac.compare_digest(token_nonce, nonce):
+        raise ValueError("The sign-in could not be matched to this browser.")
+    if clean_int(claims.get("exp"), 0) + ENTRA_CLOCK_SKEW <= now:
+        raise ValueError("The Microsoft sign-in expired before it completed.")
+    if clean_int(claims.get("nbf"), 0) - ENTRA_CLOCK_SKEW > now:
+        raise ValueError("The Microsoft sign-in is not valid yet.")
+    return claims
+
+
+def entra_identity(claims):
+    for key in ("preferred_username", "upn", "email", "unique_name", "oid"):
+        value = str(claims.get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def entra_authorized(claims, config):
+    """Match an Entra sign-in against the allowed users, groups, and app roles."""
+    allowed_users = {value.lower() for value in split_setting_lines(config["admin_users"])}
+    if allowed_users:
+        names = {
+            str(claims.get(key) or "").strip().lower()
+            for key in ("preferred_username", "upn", "email", "unique_name")
+        }
+        if names & allowed_users:
+            return True
+
+    allowed_groups = {value.lower() for value in split_setting_lines(config["admin_groups"])}
+    if allowed_groups:
+        groups = {str(value).strip().lower() for value in claims.get("groups") or []}
+        if groups & allowed_groups:
+            return True
+        if not groups and claims.get("_claim_names"):
+            # Past ~200 groups Entra sends a Graph pointer instead of the list.
+            LOGGER.warning(
+                "Entra sent a group overage claim rather than group IDs for %r, so group "
+                "membership could not be checked. Authorize this tenant with app roles instead.",
+                entra_identity(claims),
+            )
+
+    allowed_roles = {value.lower() for value in split_setting_lines(config["admin_roles"])}
+    if allowed_roles:
+        roles = {str(value).strip().lower() for value in claims.get("roles") or []}
+        if roles & allowed_roles:
+            return True
+    return False
+
+
 def csv_text(rows):
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=CSV_FIELDS, lineterminator="\r\n")
@@ -663,7 +919,7 @@ def parse_session(token):
         issued, expires = int(issued_text), int(expires_text)
     except (ValueError, UnicodeDecodeError):
         return None
-    if version != SESSION_VERSION or source not in ("local", "ad") or not username:
+    if version != SESSION_VERSION or source not in AUTH_SOURCES or not username:
         return None
     return {"source": source, "username": username, "issued": issued, "expires": expires}
 
@@ -686,9 +942,31 @@ def resolve_session(token):
             ).fetchone()
             if not active:
                 return None
-        elif setting_values(conn, ["ad_enabled"]).get("ad_enabled") != "1":
-            return None
+        else:
+            enabled_key = f"{session['source']}_enabled"
+            if setting_values(conn, [enabled_key]).get(enabled_key) != "1":
+                return None
+            # Editing the allowed users, groups, or roles for a directory takes
+            # effect immediately rather than at the end of each session.
+            if session["issued"] < source_config_epoch(conn, session["source"]):
+                return None
     return {"source": session["source"], "username": session["username"]}
+
+
+def source_config_epoch(conn, source):
+    key = f"{source}_config_epoch"
+    return clean_int(setting_values(conn, [key]).get(key), 0)
+
+
+def touch_source_config_epoch(conn, source):
+    """Stamp a directory's settings so sessions predating the change are dropped.
+
+    Unlike per-account revocation this uses the current second rather than the
+    next one, because a sign-in that lands in the same second as the save has to
+    survive -- an administrator enabling a directory would otherwise invalidate
+    the session they are about to create.
+    """
+    save_setting(conn, f"{source}_config_epoch", str(int(time.time())))
 
 
 def session_epoch(conn, source, username):
@@ -888,7 +1166,17 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_csv(template_csv(), "quicklinks-import-template.csv")
             return
         if parsed.path == "/api/session":
-            self.send_json({"authenticated": self.is_admin(), "setup_required": setup_required()})
+            self.send_json({
+                "authenticated": self.is_admin(),
+                "setup_required": setup_required(),
+                "entra_available": entra_login_available(),
+            })
+            return
+        if parsed.path == "/api/auth/entra/start":
+            self.entra_start()
+            return
+        if parsed.path == "/api/auth/entra/callback":
+            self.entra_callback(parsed.query)
             return
         if parsed.path.startswith("/api/"):
             self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
@@ -915,6 +1203,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             "/api/import": self.import_catalog,
             "/api/admin-users": self.save_admin_user,
             "/api/auth-config": self.save_auth_config,
+            "/api/entra-config": self.save_entra_config,
         }
         action = routes.get(parsed.path)
         if not action:
@@ -1045,11 +1334,133 @@ class AppHandler(SimpleHTTPRequestHandler):
             ).fetchone()
             if not target:
                 raise ValueError("Local administrator not found.")
-            ad_enabled = setting_values(conn, ["ad_enabled"]).get("ad_enabled") == "1"
-            if target["enabled"] and enabled_count <= 1 and not ad_enabled:
-                raise ValueError("Keep one enabled local administrator until Active Directory is enabled.")
+            if target["enabled"] and enabled_count <= 1 and not external_auth_enabled(conn):
+                raise ValueError(
+                    "Keep one enabled local administrator until Active Directory "
+                    "or Microsoft Entra ID is enabled."
+                )
             conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
             revoke_sessions(conn, "local", target["username"])
+        self.send_json(auth_payload())
+
+    def flow_cookie(self, token, max_age):
+        parts = [
+            f"{ENTRA_FLOW_COOKIE}={token}", "HttpOnly", "SameSite=Lax",
+            "Path=/api/auth/entra", f"Max-Age={max_age}",
+        ]
+        if self.cookie_is_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def redirect(self, location, cookies=()):
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        for cookie in cookies:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+
+    def entra_failed(self, reason):
+        """Send the browser back to the sign-in page with a short reason code."""
+        self.redirect(f"/admin?entra_error={quote(reason)}", cookies=(self.flow_cookie("", 0),))
+
+    def entra_start(self):
+        with db() as conn:
+            config = entra_config(conn)
+        if not entra_ready(config):
+            LOGGER.warning("Entra sign-in was requested but is not fully configured.")
+            self.entra_failed("config")
+            return
+        verifier, challenge = pkce_pair()
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        flow = sign_payload({
+            "state": state,
+            "nonce": nonce,
+            "verifier": verifier,
+            "exp": int(time.time()) + ENTRA_FLOW_MAX_AGE,
+        })
+        self.redirect(
+            entra_authorize_url(config, state, nonce, challenge),
+            cookies=(self.flow_cookie(flow, ENTRA_FLOW_MAX_AGE),),
+        )
+
+    def entra_callback(self, query):
+        params = parse_qs(query)
+        if params.get("error"):
+            LOGGER.warning(
+                "Entra returned %s: %s",
+                params["error"][0][:100],
+                (params.get("error_description") or [""])[0][:300],
+            )
+            self.entra_failed("denied")
+            return
+
+        flow = verify_payload(cookie_value(self.headers.get("Cookie"), ENTRA_FLOW_COOKIE))
+        code = (params.get("code") or [""])[0]
+        state = (params.get("state") or [""])[0]
+        if not flow or not code or not hmac.compare_digest(state, str(flow.get("state", ""))):
+            LOGGER.warning("Entra callback did not match a pending sign-in from this browser.")
+            self.entra_failed("state")
+            return
+
+        with db() as conn:
+            config = entra_config(conn)
+        if not entra_ready(config):
+            self.entra_failed("config")
+            return
+
+        try:
+            tokens = exchange_entra_code(config, code, str(flow.get("verifier", "")))
+            claims = decode_jwt_claims(tokens.get("id_token"))
+            validate_entra_claims(claims, config, str(flow.get("nonce", "")))
+        except ValueError as error:
+            LOGGER.warning("Entra sign-in could not be verified: %s", error)
+            self.entra_failed("token")
+            return
+
+        username = entra_identity(claims)
+        if not username:
+            LOGGER.warning("Entra ID token carried no usable account name.")
+            self.entra_failed("token")
+            return
+        if not entra_authorized(claims, config):
+            LOGGER.warning("Entra account %r is not an allowed QuickLinks administrator.", username)
+            self.entra_failed("forbidden")
+            return
+
+        LOGGER.info("Successful entra login for %r from %s.", username, self.client_ip())
+        issued = int(time.time())
+        token = sign_session("entra", username, issued, issued + SESSION_MAX_AGE)
+        self.redirect("/admin", cookies=(
+            self.session_cookie(token, SESSION_MAX_AGE),
+            self.flow_cookie("", 0),
+        ))
+
+    def save_entra_config(self):
+        body = self.read_json()
+        enabled = bool(body.get("enabled"))
+        submitted_secret = (body.get("client_secret") or "").strip()
+        with db() as conn:
+            current = entra_config(conn)
+            values = {
+                "entra_enabled": "1" if enabled else "0",
+                "entra_tenant_id": (body.get("tenant_id") or "").strip(),
+                "entra_client_id": (body.get("client_id") or "").strip(),
+                # Blank means "keep the stored secret", so rotating other
+                # settings does not require re-entering it.
+                "entra_client_secret": submitted_secret or current["client_secret"],
+                "entra_redirect_uri": (body.get("redirect_uri") or "").strip(),
+                "entra_admin_users": normalize_multiline(body.get("admin_users")),
+                "entra_admin_groups": normalize_multiline(body.get("admin_groups")),
+                "entra_admin_roles": normalize_multiline(body.get("admin_roles")),
+            }
+            if enabled:
+                validate_entra_settings(values)
+            for key, value in values.items():
+                save_setting(conn, key, value)
+            touch_source_config_epoch(conn, "entra")
         self.send_json(auth_payload())
 
     def save_auth_config(self):
@@ -1072,10 +1483,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 raise ValueError("Add at least one AD admin user or admin group.")
         with db() as conn:
             for key, value in values.items():
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
+                save_setting(conn, key, value)
+            touch_source_config_epoch(conn, "ad")
         self.send_json(auth_payload())
 
     def import_catalog(self):
@@ -1259,10 +1668,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 ("department_title", department_title),
                 ("admin_title", admin_title),
             ):
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
+                save_setting(conn, key, value)
 
             existing = conn.execute("SELECT value FROM settings WHERE key = 'logo_filename'").fetchone()
             if remove_logo and existing:
@@ -1283,10 +1689,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     (DATA_DIR / existing["value"]).unlink(missing_ok=True)
                 filename = f"branding-logo{extension}"
                 (DATA_DIR / filename).write_bytes(image_bytes)
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES('logo_filename', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (filename,),
-                )
+                save_setting(conn, "logo_filename", filename)
         self.send_json(admin_payload())
 
     def send_branding_logo(self):
