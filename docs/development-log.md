@@ -2,6 +2,15 @@
 
 Keep entries public-ready: completed work, decisions and rationale, useful failed approaches, validation, and durable lessons.
 
+## 2026-08-11 (auth page rework)
+
+- Reworked the Authentication tab so the two directory providers stop rendering their full forms inline. Chose compact status rows plus a per-provider dialog over the toggle that was also suggested: a show-one-at-a-time toggle hides whether the *other* provider is enabled, which is exactly the fact an administrator opens that page to check. Rows keep both states visible and still collapse the tab from roughly 2,200px to 468px.
+- Matched the edit-dialog pattern already used across PatchOps rather than inventing a third convention. Native `<dialog>` with `showModal()` supplies Escape and focus trapping without script.
+- Heeded the PatchOps gotcha that cost real debugging there: a `<form method="dialog">` close button nested inside a form silently truncates the outer form and would have orphaned every field. The close controls are plain `type="button"` elements, the dialogs live at top level outside `.auth-grid`, and a parser asserts `NESTED FORMS: 0`.
+- Reused the fingerprint method too. The provider forms were *moved* verbatim, never retyped, and a script compared the ordered list of every form control before and after: identical, 7 AD controls and 9 Entra controls preserved. That check is what makes a markup reshuffle of a working form safe to do quickly.
+- **The local verification run destroyed its own database, and the cause was a defect in the new test suite.** `test_data_directory_is_never_served` wrote `data/links.db` and `data/.session_secret` inside the application directory to prove they are not served, then deleted them in tearDown. That directory is the default `DATA_DIR`, so running the suite while a local server was up overwrote and then removed the developer's live database. Fixed by using dedicated canary filenames and by making the fixture helper refuse to touch any path that already exists — failing loudly beats destroying data. Verified by hashing a live local database, running the full suite, and confirming the hash is unchanged and the server still serves.
+- Escape-to-close could not be verified in the automated browser: real typing reaches the page, but a synthesised Escape produces no `cancel` event on the dialog, so the harness is swallowing that key. Close button, backdrop click, save-then-close, and row refresh after save were all verified directly. Both themes and 375px mobile check out — dialog 337x715 inside a 375x812 viewport with an internally scrolling body and no horizontal overflow.
+
 ## 2026-08-11 (image publishing)
 
 - Added `.github/workflows/publish.yml` so releases are built and pushed from CI rather than a workstation. This machine has no Docker, podman, or nerdctl and no stored registry credentials, and publishing to the Docker Hub namespace requires the account's own token, so a local build was not an option regardless of tooling.

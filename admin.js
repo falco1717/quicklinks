@@ -107,6 +107,16 @@ const el = {
   entraAdminUsers: document.querySelector("#entraAdminUsers"),
   entraAdminGroups: document.querySelector("#entraAdminGroups"),
   entraAdminRoles: document.querySelector("#entraAdminRoles"),
+  adSummary: document.querySelector("#adSummary"),
+  adStatus: document.querySelector("#adStatus"),
+  adConfigureButton: document.querySelector("#adConfigureButton"),
+  adDialog: document.querySelector("#adDialog"),
+  adDialogClose: document.querySelector("#adDialogClose"),
+  entraSummary: document.querySelector("#entraSummary"),
+  entraStatus: document.querySelector("#entraStatus"),
+  entraConfigureButton: document.querySelector("#entraConfigureButton"),
+  entraDialog: document.querySelector("#entraDialog"),
+  entraDialogClose: document.querySelector("#entraDialogClose"),
   productNotice: document.querySelector("#productNotice")
 };
 
@@ -272,6 +282,60 @@ function renderAuthentication() {
   el.entraSecretState.textContent = entra.client_secret_set
     ? "A client secret is stored. Leave the field blank to keep it, or enter a new one to replace it."
     : "No client secret is stored yet. One is required before Entra login can be enabled.";
+
+  renderProviderRows(ad, entra);
+}
+
+function countEntries(value) {
+  return (value || "").split("\n").filter((line) => line.trim()).length;
+}
+
+function pluralise(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function describeProvider(enabled, configured, parts) {
+  if (enabled) return parts.filter(Boolean).join(" · ");
+  return configured ? "Configured, not enabled" : "Not configured";
+}
+
+function setStatusPill(target, enabled, configured) {
+  target.textContent = enabled ? "Enabled" : configured ? "Disabled" : "Not configured";
+  target.classList.toggle("on", enabled);
+}
+
+function renderProviderRows(ad, entra) {
+  const adConfigured = Boolean(ad.domain);
+  el.adSummary.textContent = describeProvider(Boolean(ad.enabled), adConfigured, [
+    ad.domain,
+    pluralise(countEntries(ad.admin_users), "user"),
+    pluralise(countEntries(ad.admin_groups), "group")
+  ]);
+  setStatusPill(el.adStatus, Boolean(ad.enabled), adConfigured);
+
+  const entraConfigured = Boolean(entra.tenant_id && entra.client_id);
+  el.entraSummary.textContent = describeProvider(Boolean(entra.enabled), entraConfigured, [
+    entra.tenant_id,
+    pluralise(countEntries(entra.admin_users), "user"),
+    pluralise(countEntries(entra.admin_groups), "group"),
+    pluralise(countEntries(entra.admin_roles), "role")
+  ]);
+  setStatusPill(el.entraStatus, Boolean(entra.enabled), entraConfigured);
+}
+
+function openDialog(dialog) {
+  dialog.showModal();
+}
+
+// Native <dialog> gives Esc-to-close and focus trapping. Closing is wired to a
+// plain button rather than <form method="dialog"> so no form is ever nested
+// inside another one.
+function wireDialog(openButton, dialog, closeButton) {
+  openButton.addEventListener("click", () => openDialog(dialog));
+  closeButton.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
 }
 
 function defaultEntraRedirectUri() {
@@ -524,6 +588,7 @@ el.entraForm.addEventListener("submit", async (event) => {
       })
     });
     renderAuthentication();
+    el.entraDialog.close();
     setStatus("Microsoft Entra ID settings saved.");
   } catch (error) {
     alert(error.message);
@@ -544,6 +609,8 @@ el.newLinkButton.addEventListener("click", resetLinkForm);
 el.newLocationButton.addEventListener("click", resetLocationForm);
 el.pageType.addEventListener("change", updateLinkLocationState);
 el.newLocalUserButton.addEventListener("click", resetLocalUser);
+wireDialog(el.adConfigureButton, el.adDialog, el.adDialogClose);
+wireDialog(el.entraConfigureButton, el.entraDialog, el.entraDialogClose);
 el.brandingLogo.addEventListener("change", () => {
   const file = el.brandingLogo.files[0];
   if (!file) return;
@@ -668,6 +735,7 @@ el.adForm.addEventListener("submit", async (event) => {
       })
     });
     renderAuthentication();
+    el.adDialog.close();
     setStatus("Active Directory settings saved.");
   } catch (error) {
     alert(error.message);

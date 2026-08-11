@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.08.11.003
+
+### Changed
+
+- Reworked the Authentication tab. Active Directory and Microsoft Entra ID no longer render their full forms side by side; each is now a compact row showing its status and a one-line summary, with a Configure button opening the settings in a dialog. Both providers' state stays visible at a glance, which a show-one-at-a-time toggle would have hidden. The tab is about 4x shorter as a result.
+- The dialogs are native `<dialog>` elements, so Escape and focus trapping come from the browser rather than from script. Closing is wired to a plain button: a `<form method="dialog">` inside the provider forms would have nested one form in another and silently truncated the outer one.
+
+### Fixed
+
+- `tests/test_http.py` no longer writes to `data/links.db` and `data/.session_secret` inside the application directory. That path is the default `DATA_DIR`, so running the suite while a local server was up overwrote and then deleted the developer's own database. The fixtures use dedicated canary names, and the helper that creates them now refuses to touch a path that already exists.
+
 ## 2026.08.11.002
 
 ### Added
