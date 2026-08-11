@@ -57,11 +57,11 @@ class FirstRunTests(unittest.TestCase):
             server.create_initial_admin("attacker", "1234567")
 
     def test_environment_credentials_seed_first_admin(self):
-        server.ADMIN_USERNAME = "saltbox-user"
+        server.ADMIN_USERNAME = "provisioned-user"
         server.ADMIN_PASSWORD = "1234567"
         server.ensure_database()
         self.assertFalse(server.setup_required())
-        self.assertTrue(server.authenticate_local("saltbox-user", "1234567"))
+        self.assertTrue(server.authenticate_local("provisioned-user", "1234567"))
 
     def test_partial_environment_credentials_fail_startup(self):
         server.ADMIN_USERNAME = "owner"
