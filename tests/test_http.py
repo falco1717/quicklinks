@@ -960,5 +960,214 @@ class EntraAuthorizationTests(unittest.TestCase):
         self.assertIn("overage", " ".join(captured.output))
 
 
+class DepartmentTests(ServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin = self.create_admin()
+        self.departments = {"general": 1}
+        for name, public, order in (("IT", False, 20), ("Facilities Team", True, 30)):
+            response = self.request(
+                "POST", "/api/departments",
+                {"name": name, "public": public, "sort_order": order},
+                token=self.admin,
+            )
+            self.assertEqual(response["status"], 200, response["body"])
+            self.departments = {d["slug"]: d["id"] for d in self.json_body(response)["departments"]}
+
+    def add_content(self, slug, location_name, code):
+        self.request("POST", "/api/locations",
+                     {"name": location_name, "code": code, "department_id": self.departments[slug]},
+                     token=self.admin)
+        self.request("POST", "/api/links",
+                     {"page_type": "location", "location_code": code, "name": f"{code} tool",
+                      "url": f"https://{code}.example.com", "group_name": "Std"}, token=self.admin)
+        self.request("POST", "/api/links",
+                     {"page_type": "general", "name": f"{slug} general", "url": "https://g.example.com",
+                      "group_name": "Ops", "department_id": self.departments[slug]}, token=self.admin)
+
+    def make_viewer(self, username, slugs, password="viewerpass1"):
+        response = self.request(
+            "POST", "/api/admin-users",
+            {"username": username, "password": password, "is_admin": False,
+             "department_ids": [self.departments[s] for s in slugs]},
+            token=self.admin,
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        login = self.request("POST", "/api/login", {"username": username, "password": password})
+        self.assertEqual(login["status"], 200, login["body"])
+        return self.token_from(login)
+
+    def catalog(self, token=None):
+        return self.json_body(self.request("GET", "/api/catalog", token=token))
+
+    # -- migration and defaults ------------------------------------------
+
+    def test_a_default_department_always_exists(self):
+        # Every location and link needs one, so with none defined the portal
+        # would serve an empty catalog on a brand new install.
+        payload = self.json_body(self.request("GET", "/api/admin", token=self.admin))
+        self.assertTrue(payload["departments"])
+        self.assertEqual(payload["departments"][0]["slug"], "general")
+        self.assertEqual(payload["departments"][0]["public"], 1)
+
+    def test_records_created_without_a_department_land_in_the_default(self):
+        self.request("POST", "/api/links",
+                     {"page_type": "general", "name": "Unassigned", "url": "https://u.example.com",
+                      "group_name": "Ops"}, token=self.admin)
+        links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
+        self.assertEqual([l["department_id"] for l in links], [self.departments["general"]])
+        # And it is visible to an anonymous visitor, as it was before departments.
+        self.assertEqual(len(self.catalog()["links"]), 1)
+
+    def test_slug_is_derived_from_the_name(self):
+        self.assertIn("facilities-team", self.departments)
+
+    # -- scoping ---------------------------------------------------------
+
+    def test_anonymous_visitors_see_only_public_departments(self):
+        self.add_content("it", "Datacentre", "dc")
+        self.add_content("facilities-team", "Plant", "pl")
+        catalog = self.catalog()
+        self.assertEqual(sorted(d["slug"] for d in catalog["departments"]),
+                         ["facilities-team", "general"])
+        self.assertNotIn("dc", [l["location_code"] for l in catalog["links"]])
+        self.assertFalse(catalog["viewer"]["authenticated"])
+
+    def test_viewer_sees_only_assigned_departments(self):
+        self.add_content("it", "Datacentre", "dc")
+        self.add_content("facilities-team", "Plant", "pl")
+        token = self.make_viewer("it-viewer", ["it"])
+        catalog = self.catalog(token)
+        self.assertEqual([d["slug"] for d in catalog["departments"]], ["it"])
+        self.assertTrue(catalog["viewer"]["authenticated"])
+        self.assertFalse(catalog["viewer"]["is_admin"])
+        # The public department is not implicitly added on top of the assignment.
+        self.assertNotIn("general", [d["slug"] for d in catalog["departments"]])
+
+    def test_viewer_with_several_departments_receives_all_of_them(self):
+        """The toggle case: more than one department means a choice to make."""
+        self.add_content("it", "Datacentre", "dc")
+        self.add_content("facilities-team", "Plant", "pl")
+        token = self.make_viewer("both", ["it", "facilities-team"])
+        self.assertEqual(sorted(d["slug"] for d in self.catalog(token)["departments"]),
+                         ["facilities-team", "it"])
+
+    def test_admin_sees_every_department(self):
+        self.add_content("it", "Datacentre", "dc")
+        catalog = self.catalog(self.admin)
+        self.assertEqual(sorted(d["slug"] for d in catalog["departments"]),
+                         ["facilities-team", "general", "it"])
+        self.assertTrue(catalog["viewer"]["is_admin"])
+
+    def test_a_viewer_is_not_an_administrator(self):
+        token = self.make_viewer("it-viewer", ["it"])
+        for method, path, body in (
+            ("GET", "/api/admin", None),
+            ("GET", "/api/auth-config", None),
+            ("GET", "/api/export.csv", None),
+            ("POST", "/api/departments", {"name": "Sneaky"}),
+            ("POST", "/api/links", {"page_type": "general", "name": "x", "url": "https://x.example.com",
+                                    "group_name": "g"}),
+            ("POST", "/api/portal-settings", {"require_login": True}),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(method, path, body, token=token)["status"], 401)
+
+    # -- location links inherit ------------------------------------------
+
+    def test_moving_a_location_moves_its_links(self):
+        """A location link must never sit in a department that cannot see its location."""
+        self.add_content("it", "Datacentre", "dc")
+        payload = self.json_body(self.request("GET", "/api/admin", token=self.admin))
+        location_id = next(l["id"] for l in payload["locations"] if l["code"] == "dc")
+        self.request("POST", "/api/locations",
+                     {"id": location_id, "name": "Datacentre", "code": "dc",
+                      "department_id": self.departments["general"]}, token=self.admin)
+        links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
+        moved = [l for l in links if l["page_type"] == "location" and l["location_code"] == "dc"]
+        self.assertEqual([l["department_id"] for l in moved], [self.departments["general"]])
+
+    def test_location_link_ignores_a_submitted_department(self):
+        self.request("POST", "/api/locations",
+                     {"name": "Datacentre", "code": "dc", "department_id": self.departments["it"]},
+                     token=self.admin)
+        self.request("POST", "/api/links",
+                     {"page_type": "location", "location_code": "dc", "name": "tool",
+                      "url": "https://t.example.com", "group_name": "Std",
+                      "department_id": self.departments["facilities-team"]}, token=self.admin)
+        links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
+        self.assertEqual([l["department_id"] for l in links], [self.departments["it"]])
+
+    # -- require_login ---------------------------------------------------
+
+    def test_require_login_blocks_anonymous_access(self):
+        self.add_content("facilities-team", "Plant", "pl")
+        viewer = self.make_viewer("fac", ["facilities-team"])
+        self.assertTrue(self.catalog()["departments"])
+
+        self.assertEqual(
+            self.request("POST", "/api/portal-settings", {"require_login": True},
+                         token=self.admin)["status"], 200)
+        anonymous = self.catalog()
+        self.assertEqual(anonymous["departments"], [])
+        self.assertEqual(anonymous["links"], [])
+        self.assertTrue(anonymous["viewer"]["requires_login"])
+        # A signed-in viewer is unaffected.
+        self.assertTrue(self.catalog(viewer)["departments"])
+
+    def test_require_login_can_be_turned_back_off(self):
+        self.request("POST", "/api/portal-settings", {"require_login": True}, token=self.admin)
+        self.request("POST", "/api/portal-settings", {"require_login": False}, token=self.admin)
+        self.assertTrue(self.catalog()["departments"])
+        self.assertFalse(self.catalog()["viewer"]["requires_login"])
+
+    # -- guard rails -----------------------------------------------------
+
+    def test_viewer_must_have_at_least_one_department(self):
+        response = self.request("POST", "/api/admin-users",
+                                {"username": "nobody", "password": "viewerpass9",
+                                 "is_admin": False, "department_ids": []}, token=self.admin)
+        self.assertEqual(response["status"], 400)
+        self.assertIn("could not see anything", self.json_body(response)["error"])
+
+    def test_department_holding_content_cannot_be_deleted(self):
+        self.add_content("it", "Datacentre", "dc")
+        response = self.request("DELETE", f"/api/departments/{self.departments['it']}", token=self.admin)
+        self.assertEqual(response["status"], 400)
+        self.assertIn("still holds", self.json_body(response)["error"])
+
+    def test_empty_department_can_be_deleted(self):
+        response = self.request("DELETE", f"/api/departments/{self.departments['it']}", token=self.admin)
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertNotIn("it", [d["slug"] for d in self.json_body(response)["departments"]])
+
+    def test_last_department_cannot_be_deleted(self):
+        for slug in ("it", "facilities-team"):
+            self.request("DELETE", f"/api/departments/{self.departments[slug]}", token=self.admin)
+        response = self.request("DELETE", f"/api/departments/{self.departments['general']}", token=self.admin)
+        self.assertEqual(response["status"], 400)
+        self.assertIn("at least one department", self.json_body(response)["error"])
+
+    def test_unknown_department_is_rejected(self):
+        for body in (
+            {"page_type": "general", "name": "x", "url": "https://x.example.com",
+             "group_name": "g", "department_id": 99999},
+            {"name": "Nowhere", "code": "nw", "department_id": 99999},
+        ):
+            with self.subTest(body=body):
+                path = "/api/links" if "page_type" in body else "/api/locations"
+                response = self.request("POST", path, body, token=self.admin)
+                self.assertEqual(response["status"], 400)
+                self.assertIn("does not exist", self.json_body(response)["error"])
+
+    def test_disabled_department_is_hidden_from_everyone(self):
+        self.add_content("facilities-team", "Plant", "pl")
+        self.request("POST", "/api/departments",
+                     {"id": self.departments["facilities-team"], "name": "Facilities Team",
+                      "public": True, "enabled": False}, token=self.admin)
+        self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog()["departments"]])
+        self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog(self.admin)["departments"]])
+
+
 if __name__ == "__main__":
     unittest.main()
