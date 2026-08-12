@@ -17,6 +17,10 @@
       </a>
 
       <div class="controls" aria-label="Homepage controls">
+        <label id="departmentField" class="field hidden">
+          <span>Department</span>
+          <select id="departmentSelect"></select>
+        </label>
         <label class="field">
           <span>Location</span>
           <select id="locationSelect"></select>
@@ -29,20 +33,56 @@
           <span class="theme-icon" aria-hidden="true">◐</span>
           <span id="themeLabel">Dark mode</span>
         </button>
+        <span id="viewerStrip" class="viewer-strip hidden">
+          <span id="viewerName" class="viewer-name"></span>
+          <button id="signOutButton" class="text-button" type="button">Sign out</button>
+        </span>
         <a class="admin-link" href="admin.html">Admin</a>
       </div>
     </header>
 
     <main class="page-shell">
-      <section class="section-heading" aria-labelledby="viewTitle">
-        <div>
-          <p id="viewMeta" class="eyebrow">General</p>
-          <h2 id="viewTitle">Daily links</h2>
+      <section id="portalLogin" class="login-gate hidden" aria-labelledby="portalLoginTitle">
+        <p class="eyebrow">Sign in required</p>
+        <h2 id="portalLoginTitle">Sign in to see your links</h2>
+        <p class="login-gate-note">This portal is only available to signed-in users.</p>
+        <form id="portalLoginForm" class="login-gate-form">
+          <label class="field">
+            <span>Username</span>
+            <input id="portalUsername" type="text" autocomplete="username" required>
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="portalPassword" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="primary-button" type="submit">Sign in</button>
+        </form>
+        <div id="portalEntra" class="sso-block hidden">
+          <p class="sso-divider"><span>or</span></p>
+          <button id="portalEntraButton" class="secondary-button sso-button" type="button">
+            <svg class="sso-mark" viewBox="0 0 23 23" aria-hidden="true" focusable="false">
+              <rect x="1" y="1" width="10" height="10" fill="#f25022"></rect>
+              <rect x="12" y="1" width="10" height="10" fill="#7fba00"></rect>
+              <rect x="1" y="12" width="10" height="10" fill="#00a4ef"></rect>
+              <rect x="12" y="12" width="10" height="10" fill="#ffb900"></rect>
+            </svg>
+            <span>Sign in with Microsoft</span>
+          </button>
         </div>
-        <p id="resultCount" class="result-count"></p>
+        <p id="portalLoginError" class="login-error hidden" role="alert"></p>
       </section>
 
-      <div id="content" class="content-grid" aria-live="polite"></div>
+      <section id="portalBody">
+        <section class="section-heading" aria-labelledby="viewTitle">
+          <div>
+            <p id="viewMeta" class="eyebrow">General</p>
+            <h2 id="viewTitle">Daily links</h2>
+          </div>
+          <p id="resultCount" class="result-count"></p>
+        </section>
+
+        <div id="content" class="content-grid" aria-live="polite"></div>
+      </section>
     </main>
 
     <footer id="productNotice" class="app-footer">QuickLinks · Created by Jordan Farmer</footer>

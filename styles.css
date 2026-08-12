@@ -187,7 +187,9 @@ h3 {
   background: var(--link-hover);
 }
 
-.admin-link {
+.admin-link,
+.primary-button,
+.secondary-button {
   display: inline-flex;
   min-height: 42px;
   align-items: center;
@@ -202,8 +204,115 @@ h3 {
   text-decoration: none;
 }
 
-.admin-link:hover {
+.admin-link:hover,
+.secondary-button:hover {
   background: var(--link-hover);
+}
+
+.primary-button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #10200d;
+}
+
+/* The portal has its own stylesheet, so anything shared with the admin page
+   has to be defined here too rather than inherited from admin.css. */
+.hidden {
+  display: none !important;
+}
+
+.viewer-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.viewer-name {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.text-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.login-gate {
+  display: grid;
+  gap: 12px;
+  max-width: 440px;
+  margin: 40px auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 26px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.login-gate h2 {
+  margin: 0;
+}
+
+.login-gate-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.login-gate-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 6px;
+}
+
+.sso-block {
+  display: grid;
+  gap: 14px;
+}
+
+.sso-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.sso-divider::before,
+.sso-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.sso-button {
+  gap: 10px;
+}
+
+.sso-mark {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.login-error {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid #d2544a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--link-bg);
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.5;
 }
 
 .theme-icon {

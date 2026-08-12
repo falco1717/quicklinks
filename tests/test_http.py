@@ -965,7 +965,9 @@ class DepartmentTests(ServerTestCase):
         super().setUp()
         self.admin = self.create_admin()
         self.departments = {"general": 1}
-        for name, public, order in (("IT", False, 20), ("Facilities Team", True, 30)):
+        # general is public; IT and Facilities Team are not, so the fixture can
+        # tell "assigned", "public to everyone", and "neither" apart.
+        for name, public, order in (("IT", False, 20), ("Facilities Team", False, 30)):
             response = self.request(
                 "POST", "/api/departments",
                 {"name": name, "public": public, "sort_order": order},
@@ -1028,9 +1030,9 @@ class DepartmentTests(ServerTestCase):
         self.add_content("it", "Datacentre", "dc")
         self.add_content("facilities-team", "Plant", "pl")
         catalog = self.catalog()
-        self.assertEqual(sorted(d["slug"] for d in catalog["departments"]),
-                         ["facilities-team", "general"])
+        self.assertEqual([d["slug"] for d in catalog["departments"]], ["general"])
         self.assertNotIn("dc", [l["location_code"] for l in catalog["links"]])
+        self.assertNotIn("pl", [l["location_code"] for l in catalog["links"]])
         self.assertFalse(catalog["viewer"]["authenticated"])
 
     def test_viewer_sees_only_assigned_departments(self):
@@ -1038,11 +1040,12 @@ class DepartmentTests(ServerTestCase):
         self.add_content("facilities-team", "Plant", "pl")
         token = self.make_viewer("it-viewer", ["it"])
         catalog = self.catalog(token)
-        self.assertEqual([d["slug"] for d in catalog["departments"]], ["it"])
         self.assertTrue(catalog["viewer"]["authenticated"])
         self.assertFalse(catalog["viewer"]["is_admin"])
-        # The public department is not implicitly added on top of the assignment.
-        self.assertNotIn("general", [d["slug"] for d in catalog["departments"]])
+        # Their own department, plus the public one everybody gets.
+        self.assertEqual(sorted(d["slug"] for d in catalog["departments"]), ["general", "it"])
+        # But not a department that is neither theirs nor public.
+        self.assertNotIn("facilities-team", [d["slug"] for d in catalog["departments"]])
 
     def test_viewer_with_several_departments_receives_all_of_them(self):
         """The toggle case: more than one department means a choice to make."""
@@ -1050,7 +1053,7 @@ class DepartmentTests(ServerTestCase):
         self.add_content("facilities-team", "Plant", "pl")
         token = self.make_viewer("both", ["it", "facilities-team"])
         self.assertEqual(sorted(d["slug"] for d in self.catalog(token)["departments"]),
-                         ["facilities-team", "it"])
+                         ["facilities-team", "general", "it"])
 
     def test_admin_sees_every_department(self):
         self.add_content("it", "Datacentre", "dc")
@@ -1101,7 +1104,7 @@ class DepartmentTests(ServerTestCase):
     # -- require_login ---------------------------------------------------
 
     def test_require_login_blocks_anonymous_access(self):
-        self.add_content("facilities-team", "Plant", "pl")
+        self.add_content("general", "HQ", "hq")
         viewer = self.make_viewer("fac", ["facilities-team"])
         self.assertTrue(self.catalog()["departments"])
 
@@ -1161,12 +1164,23 @@ class DepartmentTests(ServerTestCase):
                 self.assertIn("does not exist", self.json_body(response)["error"])
 
     def test_disabled_department_is_hidden_from_everyone(self):
+        """Even when public, and even from an administrator."""
         self.add_content("facilities-team", "Plant", "pl")
         self.request("POST", "/api/departments",
                      {"id": self.departments["facilities-team"], "name": "Facilities Team",
                       "public": True, "enabled": False}, token=self.admin)
         self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog()["departments"]])
         self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog(self.admin)["departments"]])
+
+    def test_public_department_is_visible_to_signed_in_viewers(self):
+        """Signing in must never lose you access to a company-wide department."""
+        self.add_content("general", "HQ", "hq")
+        anonymous = [d["slug"] for d in self.catalog()["departments"]]
+        token = self.make_viewer("it-viewer", ["it"])
+        signed_in = [d["slug"] for d in self.catalog(token)["departments"]]
+        self.assertIn("general", anonymous)
+        self.assertIn("general", signed_in)
+        self.assertTrue(set(anonymous).issubset(set(signed_in)))
 
 
 if __name__ == "__main__":
