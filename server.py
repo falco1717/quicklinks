@@ -131,6 +131,7 @@ LINKS_TABLE_SQL = """
       cluster TEXT NOT NULL DEFAULT '',
       sort_order INTEGER NOT NULL DEFAULT 0,
       enabled INTEGER NOT NULL DEFAULT 1,
+      department_id INTEGER REFERENCES departments(id),
       FOREIGN KEY(location_code) REFERENCES locations(code)
         ON UPDATE CASCADE ON DELETE CASCADE
     )
@@ -265,14 +266,16 @@ def ensure_database():
               name TEXT NOT NULL,
               code TEXT NOT NULL UNIQUE,
               sort_order INTEGER NOT NULL DEFAULT 0,
-              enabled INTEGER NOT NULL DEFAULT 1
+              enabled INTEGER NOT NULL DEFAULT 1,
+              department_id INTEGER REFERENCES departments(id)
             );
             CREATE TABLE IF NOT EXISTS admin_users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT NOT NULL UNIQUE COLLATE NOCASE,
               password_hash TEXT NOT NULL,
               enabled INTEGER NOT NULL DEFAULT 1,
-              created_at INTEGER NOT NULL
+              created_at INTEGER NOT NULL,
+              is_admin INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS session_epochs (
               source TEXT NOT NULL,
@@ -280,14 +283,138 @@ def ensure_database():
               epoch INTEGER NOT NULL,
               PRIMARY KEY (source, username)
             );
+            CREATE TABLE IF NOT EXISTS departments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
+              description TEXT NOT NULL DEFAULT '',
+              public INTEGER NOT NULL DEFAULT 0,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS user_departments (
+              user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+              department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+              PRIMARY KEY (user_id, department_id)
+            );
+            -- Maps an AD group, Entra group object ID, or Entra app role to a
+            -- department. Resolved at login, because directory group membership
+            -- cannot be re-checked without binding again.
+            CREATE TABLE IF NOT EXISTS directory_departments (
+              source TEXT NOT NULL CHECK(source IN ('ad','entra')),
+              group_ref TEXT NOT NULL COLLATE NOCASE,
+              department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+              PRIMARY KEY (source, group_ref, department_id)
+            );
+            -- What a directory login resolved to, so later requests do not need
+            -- to re-bind. Refreshed on every successful directory sign-in.
+            CREATE TABLE IF NOT EXISTS directory_users (
+              source TEXT NOT NULL,
+              username TEXT NOT NULL COLLATE NOCASE,
+              is_admin INTEGER NOT NULL DEFAULT 0,
+              last_login INTEGER NOT NULL,
+              PRIMARY KEY (source, username)
+            );
+            CREATE TABLE IF NOT EXISTS directory_memberships (
+              source TEXT NOT NULL,
+              username TEXT NOT NULL COLLATE NOCASE,
+              department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+              PRIMARY KEY (source, username, department_id)
+            );
             """
         )
         conn.execute(LINKS_TABLE_SQL.format(if_not_exists="IF NOT EXISTS "))
         migrate_links_cascade(conn)
+        migrate_departments(conn)
         seed_initial_admin(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def column_names(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate_departments(conn):
+    """Introduce departments without changing how an existing install behaves.
+
+    Every existing location and link moves into one public department, so an
+    upgrade with no further configuration serves exactly the same catalog to
+    exactly the same anonymous visitors. Existing administrators stay
+    administrators, which is what `is_admin DEFAULT 1` gives the rows already
+    in the table.
+    """
+    if conn.execute("SELECT 1 FROM settings WHERE key = 'schema_departments'").fetchone():
+        return
+
+    if "is_admin" not in column_names(conn, "admin_users"):
+        conn.execute("ALTER TABLE admin_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 1")
+    for table in ("locations", "links"):
+        if "department_id" not in column_names(conn, table):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN department_id INTEGER REFERENCES departments(id)"
+            )
+
+    # A department must always exist, on a fresh install as much as an upgrade:
+    # every location and link belongs to exactly one, so with none defined there
+    # would be nowhere to put anything and the portal would serve an empty
+    # catalog.
+    department_id = ensure_default_department(conn)
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM locations WHERE department_id IS NULL"
+    ).fetchone()[0] + conn.execute(
+        "SELECT COUNT(*) FROM links WHERE department_id IS NULL"
+    ).fetchone()[0]
+    if orphans:
+        conn.execute("UPDATE locations SET department_id = ? WHERE department_id IS NULL", (department_id,))
+        conn.execute("UPDATE links SET department_id = ? WHERE department_id IS NULL", (department_id,))
+        LOGGER.info(
+            "Moved %s existing record(s) into the default department. It is public, so "
+            "anonymous visitors see what they saw before.",
+            orphans,
+        )
+
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES('schema_departments', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+
+
+def ensure_default_department(conn):
+    """Return the default department's id, creating it when none exist yet.
+
+    Public by default so that a new install, and an upgrade of one that was
+    serving anonymous visitors, both behave the way they did before.
+    """
+    existing = conn.execute(
+        "SELECT id FROM departments ORDER BY sort_order, id LIMIT 1"
+    ).fetchone()
+    if existing:
+        return existing["id"]
+    return conn.execute(
+        "INSERT INTO departments(name, slug, description, public, sort_order) "
+        "VALUES('General', 'general', ?, 1, 10)",
+        ("Visible to everyone, including visitors who are not signed in.",),
+    ).lastrowid
+
+
+def default_department_id(conn):
+    """Where a record goes when no department was named."""
+    row = conn.execute(
+        "SELECT id FROM departments WHERE enabled = 1 ORDER BY sort_order, id LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else ensure_default_department(conn)
+
+
+def resolve_department_id(conn, value):
+    """Validate a submitted department, falling back to the default."""
+    department_id = clean_int(value, 0)
+    if not department_id:
+        return default_department_id(conn)
+    if not conn.execute("SELECT 1 FROM departments WHERE id = ?", (department_id,)).fetchone():
+        raise ValueError("That department does not exist.")
+    return department_id
 
 
 def migrate_links_cascade(conn):
@@ -438,46 +565,122 @@ def branding_payload(conn):
     return branding
 
 
-def catalog_payload():
+def anonymous_access_allowed(conn):
+    """False when the portal has been switched to login-only."""
+    return setting_values(conn, ["require_login"]).get("require_login") != "1"
+
+
+def department_rows(conn):
+    return conn.execute(
+        "SELECT id, name, slug, description, public, sort_order, enabled "
+        "FROM departments ORDER BY sort_order, name"
+    ).fetchall()
+
+
+def readable_department_ids(conn, identity):
+    """Which departments this caller may read.
+
+    Administrators see every enabled department. A signed-in viewer sees the
+    ones assigned to them. An anonymous visitor sees the departments marked
+    public, and only while anonymous access is allowed at all.
+    """
+    enabled = {row["id"] for row in department_rows(conn) if row["enabled"]}
+    if identity is None:
+        if not anonymous_access_allowed(conn):
+            return set()
+        return {row["id"] for row in department_rows(conn) if row["enabled"] and row["public"]}
+    if identity.get("is_admin"):
+        return enabled
+    if identity["source"] == "local":
+        assigned = conn.execute(
+            "SELECT d.department_id FROM user_departments d "
+            "JOIN admin_users u ON u.id = d.user_id WHERE u.username = ?",
+            (identity["username"],),
+        ).fetchall()
+    else:
+        assigned = conn.execute(
+            "SELECT department_id FROM directory_memberships WHERE source = ? AND username = ?",
+            (identity["source"], identity["username"]),
+        ).fetchall()
+    return {row["department_id"] for row in assigned} & enabled
+
+
+def catalog_payload(identity=None):
+    """The portal's view, restricted to the departments the caller may read."""
     with db() as conn:
-        locations = rows_to_dicts(
-            conn.execute(
-                "SELECT name, code FROM locations WHERE enabled = 1 ORDER BY sort_order, name"
-            ).fetchall()
-        )
-        links = rows_to_dicts(
-            conn.execute(
-                """
-                SELECT id, page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order
-                FROM links
-                WHERE enabled = 1
-                ORDER BY sort_order, id
-                """
-            ).fetchall()
-        )
+        allowed = readable_department_ids(conn, identity)
+        departments = [
+            {"id": row["id"], "name": row["name"], "slug": row["slug"], "description": row["description"]}
+            for row in department_rows(conn)
+            if row["id"] in allowed
+        ]
+        if not allowed:
+            locations, links = [], []
+        else:
+            placeholders = ",".join("?" for _ in allowed)
+            ids = list(allowed)
+            locations = rows_to_dicts(
+                conn.execute(
+                    "SELECT name, code, department_id FROM locations "
+                    f"WHERE enabled = 1 AND department_id IN ({placeholders}) "
+                    "ORDER BY sort_order, name",
+                    ids,
+                ).fetchall()
+            )
+            links = rows_to_dicts(
+                conn.execute(
+                    "SELECT id, page_type, location_code, link_type, name, url, description, "
+                    "group_name, cluster, sort_order, department_id "
+                    f"FROM links WHERE enabled = 1 AND department_id IN ({placeholders}) "
+                    "ORDER BY sort_order, id",
+                    ids,
+                ).fetchall()
+            )
         branding = branding_payload(conn)
-    return {"locations": locations, "links": links, "branding": branding, "product": PRODUCT_NOTICE}
+        requires_login = not anonymous_access_allowed(conn)
+    return {
+        "locations": locations,
+        "links": links,
+        "departments": departments,
+        "branding": branding,
+        "product": PRODUCT_NOTICE,
+        "viewer": {
+            "authenticated": identity is not None,
+            "username": identity["username"] if identity else None,
+            "is_admin": bool(identity and identity.get("is_admin")),
+            "requires_login": requires_login,
+        },
+    }
 
 
 def admin_payload():
     with db() as conn:
         locations = rows_to_dicts(
             conn.execute(
-                "SELECT id, name, code, sort_order, enabled FROM locations ORDER BY sort_order, name"
+                "SELECT id, name, code, sort_order, enabled, department_id FROM locations ORDER BY sort_order, name"
             ).fetchall()
         )
         links = rows_to_dicts(
             conn.execute(
                 """
                 SELECT id, page_type, location_code, link_type, name, url, description,
-                       group_name, cluster, sort_order, enabled
+                       group_name, cluster, sort_order, enabled, department_id
                 FROM links
                 ORDER BY page_type, location_code, sort_order, id
                 """
             ).fetchall()
         )
+        departments = rows_to_dicts(department_rows(conn))
+        require_login = not anonymous_access_allowed(conn)
         branding = branding_payload(conn)
-    return {"locations": locations, "links": links, "branding": branding, "product": PRODUCT_NOTICE}
+    return {
+        "locations": locations,
+        "links": links,
+        "departments": departments,
+        "require_login": require_login,
+        "branding": branding,
+        "product": PRODUCT_NOTICE,
+    }
 
 
 def setting_values(conn, keys):
@@ -512,11 +715,18 @@ def auth_payload():
         entra = entra_config(conn)
         users = rows_to_dicts(
             conn.execute(
-                "SELECT id, username, enabled, created_at FROM admin_users ORDER BY username"
+                "SELECT id, username, enabled, created_at, is_admin FROM admin_users ORDER BY username"
             ).fetchall()
         )
+        grouped = {}
+        for row in conn.execute("SELECT user_id, department_id FROM user_departments").fetchall():
+            grouped.setdefault(row["user_id"], []).append(row["department_id"])
+        for user in users:
+            user["department_ids"] = sorted(grouped.get(user["id"], []))
+        departments = rows_to_dicts(department_rows(conn))
     return {
         "users": users,
+        "departments": departments,
         # The client secret is never returned, only whether one is stored.
         "entra": {
             "enabled": entra["enabled"],
@@ -541,13 +751,59 @@ def auth_payload():
 
 
 def authenticate(username, password):
-    """Return (source, canonical_username) on success, or None."""
+    """Return (source, canonical_username) on success, or None.
+
+    A successful directory sign-in also records what it resolved to, because
+    group membership cannot be re-checked on later requests without binding
+    again. Local accounts need no such snapshot -- their departments are read
+    live from `user_departments`.
+    """
     local_username = authenticate_local(username, password)
     if local_username:
         return ("local", local_username)
     if authenticate_ad(username, password):
-        return ("ad", normalize_account_name(username))
+        canonical = normalize_account_name(username)
+        # A directory sign-in has always meant administrator, and still does.
+        # Mapping directory groups to departments is a later stage; the tables
+        # exist so that change needs no migration.
+        record_directory_login("ad", canonical, True, [])
+        return ("ad", canonical)
     return None
+
+
+def record_directory_login(source, username, is_admin, group_refs):
+    """Snapshot a directory user's admin flag and department membership."""
+    with db() as conn:
+        save_directory_user(conn, source, username, is_admin, group_refs)
+
+
+def save_directory_user(conn, source, username, is_admin, group_refs):
+    conn.execute(
+        "INSERT INTO directory_users(source, username, is_admin, last_login) VALUES(?, ?, ?, ?) "
+        "ON CONFLICT(source, username) DO UPDATE SET is_admin = excluded.is_admin, "
+        "last_login = excluded.last_login",
+        (source, username, 1 if is_admin else 0, int(time.time())),
+    )
+    conn.execute(
+        "DELETE FROM directory_memberships WHERE source = ? AND username = ?", (source, username)
+    )
+    if not group_refs:
+        return
+    placeholders = ",".join("?" for _ in group_refs)
+    mapped = conn.execute(
+        f"SELECT DISTINCT department_id FROM directory_departments "
+        f"WHERE source = ? AND group_ref IN ({placeholders})",
+        [source, *group_refs],
+    ).fetchall()
+    for row in mapped:
+        conn.execute(
+            "INSERT OR IGNORE INTO directory_memberships(source, username, department_id) VALUES(?, ?, ?)",
+            (source, username, row["department_id"]),
+        )
+    LOGGER.info(
+        "%s login for %r resolved to %s department(s) from %s group reference(s).",
+        source, username, len(mapped), len(group_refs),
+    )
 
 
 def authenticate_local(username, password):
@@ -994,11 +1250,12 @@ def resolve_session(token):
             return None
         if session["source"] == "local":
             active = conn.execute(
-                "SELECT 1 FROM admin_users WHERE username = ? AND enabled = 1",
+                "SELECT is_admin FROM admin_users WHERE username = ? AND enabled = 1",
                 (session["username"],),
             ).fetchone()
             if not active:
                 return None
+            is_admin = bool(active["is_admin"])
         else:
             enabled_key = f"{session['source']}_enabled"
             if setting_values(conn, [enabled_key]).get(enabled_key) != "1":
@@ -1007,7 +1264,19 @@ def resolve_session(token):
             # effect immediately rather than at the end of each session.
             if session["issued"] < source_config_epoch(conn, session["source"]):
                 return None
-    return {"source": session["source"], "username": session["username"]}
+            recorded = conn.execute(
+                "SELECT is_admin FROM directory_users WHERE source = ? AND username = ?",
+                (session["source"], session["username"]),
+            ).fetchone()
+            # A session issued before this table existed has no row. Directory
+            # sign-in has always granted administrator, so treat it as one
+            # rather than silently demoting a live session on upgrade.
+            is_admin = bool(recorded["is_admin"]) if recorded else True
+    return {
+        "source": session["source"],
+        "username": session["username"],
+        "is_admin": is_admin,
+    }
 
 
 def source_config_epoch(conn, source):
@@ -1194,7 +1463,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/api/catalog":
-            self.send_json(catalog_payload())
+            self.send_json(catalog_payload(self.identity()))
             return
         if parsed.path == "/api/product":
             self.send_json(PRODUCT_NOTICE)
@@ -1261,6 +1530,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             "/api/admin-users": self.save_admin_user,
             "/api/auth-config": self.save_auth_config,
             "/api/entra-config": self.save_entra_config,
+            "/api/departments": self.save_department,
+            "/api/portal-settings": self.save_portal_settings,
         }
         action = routes.get(parsed.path)
         if not action:
@@ -1285,6 +1556,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/admin-users/"):
             self.safe_write(lambda: self.delete_admin_user(parsed.path.rsplit("/", 1)[-1]))
+            return
+        if parsed.path.startswith("/api/departments/"):
+            self.safe_write(lambda: self.delete_department(parsed.path.rsplit("/", 1)[-1]))
             return
         self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
 
@@ -1351,6 +1625,14 @@ class AppHandler(SimpleHTTPRequestHandler):
         username = clean_required(body.get("username"), "Username")
         password = body.get("password") or ""
         enabled = 1 if body.get("enabled", True) else 0
+        is_admin = 1 if body.get("is_admin", True) else 0
+        department_ids = [clean_int(value, 0) for value in (body.get("department_ids") or [])]
+        department_ids = [value for value in department_ids if value]
+        if not is_admin and not department_ids:
+            raise ValueError(
+                "A viewer with no departments could not see anything. Assign at least one, "
+                "or make the account an administrator."
+            )
         with db() as conn:
             if user_id:
                 existing = conn.execute(
@@ -1360,24 +1642,29 @@ class AppHandler(SimpleHTTPRequestHandler):
                     raise ValueError("Local administrator not found.")
                 if password:
                     conn.execute(
-                        "UPDATE admin_users SET username = ?, password_hash = ?, enabled = ? WHERE id = ?",
-                        (username, password_hash(password), enabled, user_id),
+                        "UPDATE admin_users SET username = ?, password_hash = ?, enabled = ?, "
+                        "is_admin = ? WHERE id = ?",
+                        (username, password_hash(password), enabled, is_admin, user_id),
                     )
                 else:
                     conn.execute(
-                        "UPDATE admin_users SET username = ?, enabled = ? WHERE id = ?",
-                        (username, enabled, user_id),
+                        "UPDATE admin_users SET username = ?, enabled = ?, is_admin = ? WHERE id = ?",
+                        (username, enabled, is_admin, user_id),
                     )
+                assign_user_departments(conn, user_id, department_ids)
                 renamed = username.lower() != existing["username"].lower()
                 if password or renamed or not enabled:
                     revoke_sessions(conn, "local", existing["username"])
                     if renamed:
                         revoke_sessions(conn, "local", username)
             else:
-                conn.execute(
-                    "INSERT INTO admin_users(username, password_hash, enabled, created_at) VALUES(?, ?, ?, ?)",
-                    (username, password_hash(clean_required(password, "Password")), enabled, int(time.time())),
-                )
+                new_id = conn.execute(
+                    "INSERT INTO admin_users(username, password_hash, enabled, created_at, is_admin) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (username, password_hash(clean_required(password, "Password")), enabled,
+                     int(time.time()), is_admin),
+                ).lastrowid
+                assign_user_departments(conn, new_id, department_ids)
         self.send_json(auth_payload())
 
     def delete_admin_user(self, raw_id):
@@ -1488,6 +1775,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         LOGGER.info("Successful entra login for %r from %s.", username, self.client_ip())
+        # As with AD, an Entra sign-in currently implies administrator.
+        record_directory_login("entra", username, True, [])
         issued = int(time.time())
         token = sign_session("entra", username, issued, issued + SESSION_MAX_AGE)
         self.redirect("/admin", cookies=(
@@ -1519,6 +1808,73 @@ class AppHandler(SimpleHTTPRequestHandler):
                 save_setting(conn, key, value)
             touch_source_config_epoch(conn, "entra")
         self.send_json(auth_payload())
+
+    def save_portal_settings(self):
+        body = self.read_json()
+        require_login = "1" if body.get("require_login") else "0"
+        with db() as conn:
+            if require_login == "1" and not conn.execute(
+                "SELECT 1 FROM admin_users WHERE enabled = 1 LIMIT 1"
+            ).fetchone() and not external_auth_enabled(conn):
+                raise ValueError(
+                    "Enable a login method before requiring one, or nobody will be able to sign in."
+                )
+            save_setting(conn, "require_login", require_login)
+        LOGGER.info("Anonymous portal access %s.", "disabled" if require_login == "1" else "enabled")
+        self.send_json(admin_payload())
+
+    def save_department(self):
+        body = self.read_json()
+        department_id = clean_int(body.get("id"), 0)
+        name = clean_required(body.get("name"), "Department name")
+        slug = department_slug(body.get("slug") or name)
+        description = (body.get("description") or "").strip()
+        public = 1 if body.get("public") else 0
+        sort_order = clean_int(body.get("sort_order"), 0)
+        enabled = 1 if body.get("enabled", True) else 0
+        with db() as conn:
+            if department_id:
+                if not conn.execute(
+                    "SELECT 1 FROM departments WHERE id = ?", (department_id,)
+                ).fetchone():
+                    raise ValueError("Department not found.")
+                conn.execute(
+                    "UPDATE departments SET name = ?, slug = ?, description = ?, public = ?, "
+                    "sort_order = ?, enabled = ? WHERE id = ?",
+                    (name, slug, description, public, sort_order, enabled, department_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO departments(name, slug, description, public, sort_order, enabled) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    (name, slug, description, public, sort_order, enabled),
+                )
+        self.send_json(admin_payload())
+
+    def delete_department(self, raw_id):
+        department_id = clean_int(raw_id, 0)
+        with db() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM departments WHERE id = ?", (department_id,)
+            ).fetchone():
+                raise ValueError("Department not found.")
+            if conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0] <= 1:
+                raise ValueError("Keep at least one department; every link and location needs one.")
+            # Refuse rather than cascade. Deleting a department that still holds
+            # content would take the content with it, which is not what someone
+            # tidying up a department list expects.
+            holdings = conn.execute(
+                "SELECT (SELECT COUNT(*) FROM locations WHERE department_id = ?) AS locations, "
+                "(SELECT COUNT(*) FROM links WHERE department_id = ?) AS links",
+                (department_id, department_id),
+            ).fetchone()
+            if holdings["locations"] or holdings["links"]:
+                raise ValueError(
+                    f"That department still holds {holdings['locations']} location(s) and "
+                    f"{holdings['links']} link(s). Move them to another department first."
+                )
+            conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+        self.send_json(admin_payload())
 
     def save_auth_config(self):
         body = self.read_json()
@@ -1591,6 +1947,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         available_codes = {location["code"] for location in locations}
         with db() as conn:
+            import_department = default_department_id(conn)
             if mode == "merge":
                 available_codes.update(
                     row["code"] for row in conn.execute("SELECT code FROM locations").fetchall()
@@ -1607,10 +1964,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             for location in locations:
                 conn.execute(
                     """
-                    INSERT INTO locations(name, code, sort_order, enabled) VALUES(:name, :code, :sort_order, :enabled)
+                    INSERT INTO locations(name, code, sort_order, enabled, department_id)
+                    VALUES(:name, :code, :sort_order, :enabled, :department_id)
                     ON CONFLICT(code) DO UPDATE SET name=excluded.name, sort_order=excluded.sort_order, enabled=excluded.enabled
                     """,
-                    location,
+                    {**location, "department_id": import_department},
                 )
             for link in links:
                 existing = conn.execute(
@@ -1632,11 +1990,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                     conn.execute(
                         """
                         INSERT INTO links(page_type, location_code, link_type, name, url, description,
-                          group_name, cluster, sort_order, enabled)
+                          group_name, cluster, sort_order, enabled, department_id)
                         VALUES(:page_type, :location_code, :link_type, :name, :url, :description,
-                          :group_name, :cluster, :sort_order, :enabled)
+                          :group_name, :cluster, :sort_order, :enabled, :department_id)
                         """,
-                        link,
+                        {**link, "department_id": import_department},
                     )
         self.send_json({
             **admin_payload(),
@@ -1651,6 +2009,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         sort_order = clean_int(body.get("sort_order"), 0)
         enabled = 1 if body.get("enabled", True) else 0
         with db() as conn:
+            department_id = resolve_department_id(conn, body.get("department_id"))
             if location_id:
                 if not conn.execute(
                     "SELECT 1 FROM locations WHERE id = ?", (location_id,)
@@ -1659,13 +2018,23 @@ class AppHandler(SimpleHTTPRequestHandler):
                 # The location foreign key cascades, so renaming a code carries
                 # its links along automatically.
                 conn.execute(
-                    "UPDATE locations SET name = ?, code = ?, sort_order = ?, enabled = ? WHERE id = ?",
-                    (name, code, sort_order, enabled, location_id),
+                    "UPDATE locations SET name = ?, code = ?, sort_order = ?, enabled = ?, "
+                    "department_id = ? WHERE id = ?",
+                    (name, code, sort_order, enabled, department_id, location_id),
+                )
+                # A location link belongs to whatever department its location
+                # does, so moving a location moves its links with it. Otherwise
+                # the two could disagree and a link would be visible to a
+                # department that cannot see the location it sits under.
+                conn.execute(
+                    "UPDATE links SET department_id = ? WHERE page_type = 'location' AND location_code = ?",
+                    (department_id, code),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO locations(name, code, sort_order, enabled) VALUES(?, ?, ?, ?)",
-                    (name, code, sort_order, enabled),
+                    "INSERT INTO locations(name, code, sort_order, enabled, department_id) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (name, code, sort_order, enabled, department_id),
                 )
         self.send_json(admin_payload())
 
@@ -1689,6 +2058,16 @@ class AppHandler(SimpleHTTPRequestHandler):
         sort_order = clean_int(body.get("sort_order"), 0)
         enabled = 1 if body.get("enabled", True) else 0
         with db() as conn:
+            if page_type == "location":
+                owner = conn.execute(
+                    "SELECT department_id FROM locations WHERE code = ?", (location_code,)
+                ).fetchone()
+                if not owner:
+                    raise ValueError("That location code does not exist.")
+                # Inherited, not chosen: see save_location.
+                department_id = owner["department_id"] or default_department_id(conn)
+            else:
+                department_id = resolve_department_id(conn, body.get("department_id"))
             if link_id:
                 if not conn.execute("SELECT 1 FROM links WHERE id = ?", (link_id,)).fetchone():
                     raise ValueError("Link not found.")
@@ -1696,18 +2075,18 @@ class AppHandler(SimpleHTTPRequestHandler):
                     """
                     UPDATE links
                     SET page_type = ?, location_code = ?, link_type = ?, name = ?, url = ?, description = ?,
-                        group_name = ?, cluster = ?, sort_order = ?, enabled = ?
+                        group_name = ?, cluster = ?, sort_order = ?, enabled = ?, department_id = ?
                     WHERE id = ?
                     """,
-                    (page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled, link_id),
+                    (page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled, department_id, link_id),
                 )
             else:
                 conn.execute(
                     """
-                    INSERT INTO links(page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO links(page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled, department_id)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled),
+                    (page_type, location_code, link_type, name, url, description, group_name, cluster, sort_order, enabled, department_id),
                 )
         self.send_json(admin_payload())
 
@@ -1790,7 +2169,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         return resolve_session(cookie_value(self.headers.get("Cookie"), SESSION_COOKIE))
 
     def is_admin(self):
-        return self.identity() is not None
+        identity = self.identity()
+        return bool(identity and identity.get("is_admin"))
 
     def require_admin(self):
         if self.is_admin():
@@ -1895,6 +2275,26 @@ def clean_required(value, label):
     if not cleaned:
         raise ValueError(f"{label} is required.")
     return cleaned
+
+
+def assign_user_departments(conn, user_id, department_ids):
+    """Replace a local user's department assignments."""
+    conn.execute("DELETE FROM user_departments WHERE user_id = ?", (user_id,))
+    for department_id in dict.fromkeys(department_ids):
+        if not conn.execute("SELECT 1 FROM departments WHERE id = ?", (department_id,)).fetchone():
+            raise ValueError("That department does not exist.")
+        conn.execute(
+            "INSERT OR IGNORE INTO user_departments(user_id, department_id) VALUES(?, ?)",
+            (user_id, department_id),
+        )
+
+
+def department_slug(value):
+    """A short, URL-safe handle for a department."""
+    cleaned = re.sub(r"[^a-z0-9]+", "-", clean_required(value, "Department slug").lower()).strip("-")
+    if not cleaned:
+        raise ValueError("Department slug must contain at least one letter or number.")
+    return cleaned[:48]
 
 
 def clean_url(value, label="URL"):
