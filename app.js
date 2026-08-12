@@ -6,6 +6,8 @@ const DEFAULT_DARK_LOGO = "/assets/quicklinks-logo-dark.png";
 const state = {
   locations: [],
   links: [],
+  departments: [],
+  viewer: {},
   branding: {},
   product: {
     notice: "QuickLinks · Created by Jordan Farmer"
@@ -14,6 +16,19 @@ const state = {
 
 const elements = {
   brandLogo: document.querySelector("#brandLogo"),
+  departmentField: document.querySelector("#departmentField"),
+  departmentSelect: document.querySelector("#departmentSelect"),
+  viewerStrip: document.querySelector("#viewerStrip"),
+  viewerName: document.querySelector("#viewerName"),
+  signOutButton: document.querySelector("#signOutButton"),
+  portalLogin: document.querySelector("#portalLogin"),
+  portalBody: document.querySelector("#portalBody"),
+  portalLoginForm: document.querySelector("#portalLoginForm"),
+  portalUsername: document.querySelector("#portalUsername"),
+  portalPassword: document.querySelector("#portalPassword"),
+  portalLoginError: document.querySelector("#portalLoginError"),
+  portalEntra: document.querySelector("#portalEntra"),
+  portalEntraButton: document.querySelector("#portalEntraButton"),
   companyName: document.querySelector("#companyName"),
   departmentTitle: document.querySelector("#departmentTitle"),
   locationSelect: document.querySelector("#locationSelect"),
@@ -51,6 +66,53 @@ function updateBrandLogo() {
   const logoUrl = state.branding.logo_url || DEFAULT_LOGO;
   const isDark = document.documentElement.dataset.theme === "dark";
   elements.brandLogo.src = isDark && isDefaultLogo(logoUrl) ? DEFAULT_DARK_LOGO : logoUrl;
+}
+
+function selectedDepartmentId() {
+  return Number(elements.departmentSelect.value) || null;
+}
+
+function departmentsAvailable() {
+  return state.departments.length > 0;
+}
+
+// Locations and general links both belong to a department, so everything the
+// page renders is filtered to the one on screen.
+function departmentLocations() {
+  const departmentId = selectedDepartmentId();
+  if (!departmentId) return state.locations;
+  return state.locations.filter((location) => location.department_id === departmentId);
+}
+
+function departmentLinks() {
+  const departmentId = selectedDepartmentId();
+  if (!departmentId) return state.links;
+  return state.links.filter((link) => link.department_id === departmentId);
+}
+
+function populateDepartments() {
+  elements.departmentSelect.replaceChildren();
+  state.departments.forEach((department) => {
+    const option = document.createElement("option");
+    option.value = String(department.id);
+    option.textContent = department.name;
+    elements.departmentSelect.append(option);
+  });
+  // With a single department there is no choice to make, so the selector only
+  // appears once it would actually do something.
+  elements.departmentField.classList.toggle("hidden", state.departments.length < 2);
+}
+
+function selectDepartmentFromUrl() {
+  const requested = new URLSearchParams(window.location.search).get("department");
+  const match = state.departments.find((department) => department.slug === requested);
+  const chosen = match || state.departments[0];
+  if (chosen) elements.departmentSelect.value = String(chosen.id);
+}
+
+function currentDepartment() {
+  const departmentId = selectedDepartmentId();
+  return state.departments.find((department) => department.id === departmentId) || null;
 }
 
 function groupBy(items, key) {
@@ -153,8 +215,8 @@ function createEmptyState(message) {
 }
 
 function allVisibleLinks() {
-  const locationNames = new Map(state.locations.map((location) => [location.code, location.name]));
-  return state.links.map((link) => ({
+  const locationNames = new Map(departmentLocations().map((location) => [location.code, location.name]));
+  return departmentLinks().map((link) => ({
     ...link,
     location_name: link.page_type === GENERAL_KEY ? "General" : locationNames.get(link.location_code) || link.location_code
   }));
@@ -215,21 +277,28 @@ function updateLocationUrl(selected) {
   } else {
     url.searchParams.set("location", selected);
   }
+  const department = currentDepartment();
+  if (department && state.departments.length > 1) {
+    url.searchParams.set("department", department.slug);
+  } else {
+    url.searchParams.delete("department");
+  }
   window.history.pushState({ location: selected }, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function selectLocationFromUrl() {
   const requested = getRequestedLocation();
-  const isKnownLocation = state.locations.some((location) => location.code === requested);
+  const isKnownLocation = departmentLocations().some((location) => location.code === requested);
   elements.locationSelect.value = isKnownLocation ? requested : GENERAL_KEY;
 }
 
 function renderGeneral(query) {
-  const allLinks = state.links.filter((link) => link.page_type === GENERAL_KEY);
+  const allLinks = departmentLinks().filter((link) => link.page_type === GENERAL_KEY);
   const links = allLinks.filter((link) => matchesSearch(link, query));
   const groups = groupBy(links, "group_name");
 
-  elements.viewMeta.textContent = "General";
+  const department = currentDepartment();
+  elements.viewMeta.textContent = department ? department.name : "General";
   elements.viewTitle.textContent = "Daily links";
   elements.resultCount.textContent = `${links.length} of ${allLinks.length} links`;
   elements.content.replaceChildren();
@@ -248,7 +317,7 @@ function renderGeneral(query) {
 }
 
 function renderLocation(location, query) {
-  const allLinks = state.links
+  const allLinks = departmentLinks()
     .filter((link) => link.page_type === "location" && link.location_code === location.code)
     .map((link) => ({ ...link, location_name: location.name }));
   const visibleLinks = allLinks.filter((link) => matchesSearch(link, query));
@@ -308,7 +377,7 @@ function render() {
     return;
   }
 
-  const location = state.locations.find((item) => item.code === selected);
+  const location = departmentLocations().find((item) => item.code === selected);
   if (location) renderLocation(location, query);
 }
 
@@ -320,7 +389,7 @@ function populateLocations() {
   generalOption.textContent = "General";
   elements.locationSelect.append(generalOption);
 
-  [...state.locations].sort(compareByName).forEach((location) => {
+  [...departmentLocations()].sort(compareByName).forEach((location) => {
     const option = document.createElement("option");
     option.value = location.code;
     option.textContent = location.name;
@@ -346,6 +415,33 @@ function toggleTheme() {
   applyTheme(nextTheme);
 }
 
+function showLoginError(message) {
+  elements.portalLoginError.textContent = message || "";
+  elements.portalLoginError.classList.toggle("hidden", !message);
+}
+
+function applyViewer(viewer = {}) {
+  state.viewer = viewer;
+  const signedIn = Boolean(viewer.authenticated);
+  elements.viewerStrip.classList.toggle("hidden", !signedIn);
+  if (signedIn) elements.viewerName.textContent = viewer.username || "";
+  // The gate only appears when anonymous access is switched off and nobody is
+  // signed in; otherwise the catalog renders as it always did.
+  const gated = Boolean(viewer.requires_login) && !signedIn;
+  elements.portalLogin.classList.toggle("hidden", !gated);
+  elements.portalBody.classList.toggle("hidden", gated);
+  return gated;
+}
+
+async function refreshEntraAvailability() {
+  try {
+    const session = await (await fetch("/api/session")).json();
+    elements.portalEntra.classList.toggle("hidden", !session.entra_available);
+  } catch {
+    elements.portalEntra.classList.add("hidden");
+  }
+}
+
 async function loadCatalog() {
   elements.content.replaceChildren(createEmptyState("Loading links..."));
   const response = await fetch("/api/catalog");
@@ -353,11 +449,25 @@ async function loadCatalog() {
   const catalog = await response.json();
   state.locations = catalog.locations;
   state.links = catalog.links;
+  state.departments = catalog.departments || [];
   applyProductNotice(catalog.product);
   applyBranding(catalog.branding);
+  const gated = applyViewer(catalog.viewer);
+  if (gated) {
+    await refreshEntraAvailability();
+    return;
+  }
+  populateDepartments();
+  selectDepartmentFromUrl();
   populateLocations();
   selectLocationFromUrl();
   elements.searchInput.value = "";
+  if (!departmentsAvailable()) {
+    elements.content.replaceChildren(
+      createEmptyState("No departments have been shared with you yet. Ask an administrator for access.")
+    );
+    return;
+  }
   render();
 }
 
@@ -366,9 +476,48 @@ loadCatalog().catch(() => {
   elements.content.replaceChildren(createEmptyState("The link catalog could not be loaded."));
 });
 
+elements.departmentSelect.addEventListener("change", () => {
+  // Switching department changes which locations exist, so the location list is
+  // rebuilt and reset rather than carried across.
+  populateLocations();
+  elements.locationSelect.value = GENERAL_KEY;
+  updateLocationUrl(GENERAL_KEY);
+  render();
+});
 elements.locationSelect.addEventListener("change", () => {
   updateLocationUrl(elements.locationSelect.value);
   render();
+});
+elements.portalLoginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showLoginError("");
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: elements.portalUsername.value,
+        password: elements.portalPassword.value
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Sign in failed.");
+    elements.portalPassword.value = "";
+    await loadCatalog();
+  } catch (error) {
+    showLoginError(error.message);
+  }
+});
+elements.portalEntraButton.addEventListener("click", () => {
+  window.location.assign("/api/auth/entra/start");
+});
+elements.signOutButton.addEventListener("click", async () => {
+  await fetch("/api/logout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}"
+  });
+  window.location.assign("/");
 });
 elements.searchInput.addEventListener("input", render);
 elements.themeToggle.addEventListener("click", toggleTheme);

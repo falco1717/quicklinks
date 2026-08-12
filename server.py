@@ -584,11 +584,14 @@ def readable_department_ids(conn, identity):
     ones assigned to them. An anonymous visitor sees the departments marked
     public, and only while anonymous access is allowed at all.
     """
-    enabled = {row["id"] for row in department_rows(conn) if row["enabled"]}
+    rows = department_rows(conn)
+    enabled = {row["id"] for row in rows if row["enabled"]}
+    # "Public" means visible to everyone, signed in or not. Without this a
+    # viewer assigned to one department would lose access to the company-wide
+    # department they could see while signed out.
+    public = {row["id"] for row in rows if row["enabled"] and row["public"]}
     if identity is None:
-        if not anonymous_access_allowed(conn):
-            return set()
-        return {row["id"] for row in department_rows(conn) if row["enabled"] and row["public"]}
+        return public if anonymous_access_allowed(conn) else set()
     if identity.get("is_admin"):
         return enabled
     if identity["source"] == "local":
@@ -602,7 +605,7 @@ def readable_department_ids(conn, identity):
             "SELECT department_id FROM directory_memberships WHERE source = ? AND username = ?",
             (identity["source"], identity["username"]),
         ).fetchall()
-    return {row["department_id"] for row in assigned} & enabled
+    return ({row["department_id"] for row in assigned} | public) & enabled
 
 
 def catalog_payload(identity=None):
