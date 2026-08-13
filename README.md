@@ -1,6 +1,6 @@
 # QuickLinks
 
-QuickLinks is a clean, self-hosted link portal with a browser-based admin center. It supports custom branding, locations, grouped links, CSV import/export, local administrators, and optional Active Directory or Microsoft Entra ID authentication.
+QuickLinks is a clean, self-hosted link portal with a browser-based admin center. It supports custom branding, departmental views, locations, grouped links, CSV import/export, local accounts, and optional Active Directory or Microsoft Entra ID authentication.
 
 ## Quick start
 
@@ -42,6 +42,42 @@ QuickLinks is a standard-library Python application, so it runs directly with no
 | `LOG_LEVEL` | `INFO` | Logging verbosity. Failed logins, throttled logins, and directory errors are logged here. |
 
 Do not commit `.env`. Keep `data/` persistent and back it up; it contains the SQLite database, generated session secret, and uploaded branding.
+
+## Departments
+
+Departments let separate teams have their own view of the portal. Every location and link belongs to **exactly one** department, and a viewer sees only the departments they have been given.
+
+Manage them under **Admin → Departments**. A fresh install, and any install upgraded from an earlier version, starts with a single department called **General** that is marked visible to everyone and holds all existing content — so nothing changes until you add a second one.
+
+| Department setting | Effect |
+| --- | --- |
+| **Visible to everyone** | Anyone can see it, signed in or not. Use it for the links the whole company needs. |
+| **Enabled** | Unticking hides the department from everyone, administrators included, without deleting anything. |
+| Slug | Used in the portal URL as `?department=<slug>`. Derived from the name if you leave it blank. |
+
+Who sees what:
+
+| Caller | Sees |
+| --- | --- |
+| Administrator | every enabled department |
+| Signed-in viewer | the departments assigned to them, plus any marked visible to everyone |
+| Not signed in | only the departments marked visible to everyone |
+
+A location's links always follow the location, so moving a location to another department takes its links with it. That is why the department field is fixed rather than editable when you are editing a location link — a link can never end up visible to a department that cannot see the location it sits under.
+
+When a viewer has more than one department, the portal shows a **Department** selector above **Location**, and the location list only ever contains that department's locations. With a single department the selector is hidden, because there is no choice to make.
+
+### Viewer accounts
+
+Under **Admin → Authentication → Local accounts**, untick **Administrator** to turn an account into a viewer, then tick the departments it should see. A viewer can sign in to the portal but is refused every administrative endpoint. Administrators always see everything, so the department list is inert while **Administrator** is ticked.
+
+QuickLinks will not let you remove the last administrator — viewer accounts do not count, so deleting, demoting, or disabling the only administrator is refused unless a directory is enabled or another administrator exists.
+
+### Requiring sign-in
+
+Under **Admin → Authentication → Portal access**, tick **Require sign-in to view the portal** to switch off anonymous browsing entirely. The portal then shows a sign-in page instead of the catalog and nothing is public, whatever the individual departments say. Turning it on is refused when no login method exists, so you cannot lock yourself out.
+
+Directory sign-in — Active Directory or Microsoft Entra ID — currently grants administrator access, exactly as it did before departments existed. Mapping directory groups to departments is not implemented yet; assign departments to local accounts in the meantime.
 
 ## Microsoft Entra ID
 

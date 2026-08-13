@@ -98,6 +98,7 @@
         <div class="tabs" role="tablist" aria-label="Admin sections">
           <button class="tab-button active" type="button" data-tab="links">Links</button>
           <button class="tab-button" type="button" data-tab="locations">Locations</button>
+          <button class="tab-button" type="button" data-tab="departments">Departments</button>
           <button class="tab-button" type="button" data-tab="branding">Branding</button>
           <button class="tab-button" type="button" data-tab="data">Import / Export</button>
           <button class="tab-button" type="button" data-tab="authentication">Authentication</button>
@@ -141,6 +142,10 @@
                       <option value="standard">Standard service</option>
                       <option value="vhost">Vhost</option>
                     </select>
+                  </label>
+                  <label class="field">
+                    <span>Department</span>
+                    <select id="linkDepartment"></select>
                   </label>
                   <label class="field">
                     <span>Sort order</span>
@@ -201,6 +206,10 @@
                     <input id="locationCode" type="text" required>
                   </label>
                   <label class="field">
+                    <span>Department</span>
+                    <select id="locationDepartment"></select>
+                  </label>
+                  <label class="field">
                     <span>Sort order</span>
                     <input id="locationSort" type="number" min="0" step="1" value="0">
                   </label>
@@ -213,6 +222,48 @@
                 <div class="button-row">
                   <button class="primary-button" type="submit">Save location</button>
                   <button id="deleteLocationButton" class="danger-button" type="button">Delete location</button>
+                </div>
+              </form>
+            </div>
+
+            <div id="departmentsEditor" class="hidden">
+              <div class="editor-heading">
+                <h3 id="departmentFormTitle">Add department</h3>
+                <button id="newDepartmentButton" class="secondary-button" type="button">New department</button>
+              </div>
+
+              <form id="departmentForm" class="admin-form">
+                <input id="departmentId" type="hidden">
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Name</span>
+                    <input id="departmentName" type="text" required>
+                  </label>
+                  <label class="field">
+                    <span>Slug</span>
+                    <input id="departmentSlug" type="text" placeholder="derived from the name">
+                  </label>
+                  <label class="field">
+                    <span>Sort order</span>
+                    <input id="departmentSort" type="number" min="0" step="1" value="0">
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Description</span>
+                  <input id="departmentDescription" type="text">
+                </label>
+                <label class="check-field">
+                  <input id="departmentPublic" type="checkbox">
+                  <span>Visible to everyone, including visitors who are not signed in</span>
+                </label>
+                <label class="check-field">
+                  <input id="departmentEnabled" type="checkbox" checked>
+                  <span>Department enabled</span>
+                </label>
+                <p class="field-help">Every location and link belongs to exactly one department. A location's links follow the location, so moving it moves them too.</p>
+                <div class="button-row">
+                  <button class="primary-button" type="submit">Save department</button>
+                  <button id="deleteDepartmentButton" class="danger-button" type="button">Delete department</button>
                 </div>
               </form>
             </div>
@@ -291,9 +342,19 @@
               <div class="editor-heading">
                 <h3>Authentication</h3>
               </div>
+              <section class="tool-section">
+                <h4>Portal access</h4>
+                <label class="check-field">
+                  <input id="requireLogin" type="checkbox">
+                  <span>Require sign-in to view the portal</span>
+                </label>
+                <p class="field-help">When off, visitors who are not signed in see the departments marked visible to everyone. When on, the portal shows a sign-in page instead and nothing is public.</p>
+                <button id="savePortalSettings" class="primary-button" type="button">Save portal access</button>
+              </section>
+
               <div class="auth-grid">
                 <section class="tool-section">
-                  <h4>Local administrators</h4>
+                  <h4>Local accounts</h4>
                   <div id="localUserList" class="admin-list compact-list"></div>
                   <form id="localUserForm" class="admin-form">
                     <input id="localUserId" type="hidden">
@@ -310,6 +371,15 @@
                       <input id="localUserEnabled" type="checkbox" checked>
                       <span>Account enabled</span>
                     </label>
+                    <label class="check-field">
+                      <input id="localUserIsAdmin" type="checkbox" checked>
+                      <span>Administrator (can manage everything)</span>
+                    </label>
+                    <fieldset id="localUserDepartments" class="department-picker">
+                      <legend>Departments this account can view</legend>
+                      <p id="localUserDepartmentsHelp" class="field-help">Administrators already see every department.</p>
+                      <div id="localUserDepartmentList" class="checkbox-list"></div>
+                    </fieldset>
                     <div class="button-row">
                       <button class="primary-button" type="submit">Save local user</button>
                       <button id="newLocalUserButton" class="secondary-button" type="button">New user</button>
