@@ -37,7 +37,7 @@ Download a release rather than the default branch, so you know what you are runn
 
 ```bash
 sudo mkdir -p /opt/quicklinks-app
-curl -sSL https://github.com/falco1717/quicklinks/archive/refs/tags/2026.08.11.004.tar.gz \
+curl -sSL https://github.com/falco1717/quicklinks/archive/refs/tags/2026.08.13.001.tar.gz \
   | sudo tar -xz -C /opt/quicklinks-app --strip-components=1
 sudo chown -R root:root /opt/quicklinks-app
 ```
