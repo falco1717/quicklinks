@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Departmental views. Every location and link belongs to exactly one department, and a department can be marked visible to everyone. The portal gains a Department selector above Location; switching it rebuilds the location list so only that department's locations are offered. The selector stays hidden while there is one department.
+- Viewer accounts. A local account can be a viewer rather than an administrator, assigned to one or more departments. Viewers sign in to the portal and are refused every administrative endpoint. Portal viewers reuse the existing authentication system, so the hardened session handling applies unchanged.
+- A **Require sign-in to view the portal** setting that switches off anonymous browsing entirely; the portal then shows a sign-in page instead of the catalog. Enabling it is refused when no login method exists.
+- An Admin → Departments tab, department pickers on the location and link forms, and department assignment on local accounts.
+
+### Changed
+
+- A location's links follow the location, so moving a location to another department moves its links with it. The department field is therefore derived rather than editable when editing a location link, which stops a link becoming visible to a department that cannot see its location.
+- "Visible to everyone" means exactly that, signed in or not: a viewer sees their assigned departments *plus* the public ones. Without this, signing in could lose someone access to a company-wide department they could see while signed out.
+- The last-administrator guard no longer counts viewer accounts. Deleting, demoting, or disabling the only administrator is refused unless another administrator exists or a directory is enabled.
+
+Upgrades are behaviour-preserving: existing locations and links move into a single public department called General, so an upgraded install with no further configuration serves the same catalog to the same visitors. Directory sign-in still grants administrator access; mapping directory groups to departments is not implemented yet.
+
+
 ## 2026.08.11.004
 
 - Removed the Saltbox integration documentation and the external deployment role it referenced. Unattended provisioning through `ADMIN_USERNAME` and `ADMIN_PASSWORD` is unchanged and still supported; only the Saltbox-specific packaging and instructions are gone.

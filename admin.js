@@ -8,8 +8,11 @@ const state = {
     notice: "QuickLinks · Created by Jordan Farmer"
   },
   auth: { users: [], ad: {} },
+  departments: [],
+  requireLogin: false,
   selectedLinkId: null,
-  selectedLocationId: null
+  selectedLocationId: null,
+  selectedDepartmentId: null
 };
 
 const THEME_KEY = "quicklinks-theme";
@@ -117,6 +120,25 @@ const el = {
   entraConfigureButton: document.querySelector("#entraConfigureButton"),
   entraDialog: document.querySelector("#entraDialog"),
   entraDialogClose: document.querySelector("#entraDialogClose"),
+  departmentsEditor: document.querySelector("#departmentsEditor"),
+  departmentForm: document.querySelector("#departmentForm"),
+  departmentFormTitle: document.querySelector("#departmentFormTitle"),
+  departmentId: document.querySelector("#departmentId"),
+  departmentName: document.querySelector("#departmentName"),
+  departmentSlug: document.querySelector("#departmentSlug"),
+  departmentDescription: document.querySelector("#departmentDescription"),
+  departmentSort: document.querySelector("#departmentSort"),
+  departmentPublic: document.querySelector("#departmentPublic"),
+  departmentEnabled: document.querySelector("#departmentEnabled"),
+  newDepartmentButton: document.querySelector("#newDepartmentButton"),
+  deleteDepartmentButton: document.querySelector("#deleteDepartmentButton"),
+  linkDepartment: document.querySelector("#linkDepartment"),
+  locationDepartment: document.querySelector("#locationDepartment"),
+  requireLogin: document.querySelector("#requireLogin"),
+  savePortalSettings: document.querySelector("#savePortalSettings"),
+  localUserIsAdmin: document.querySelector("#localUserIsAdmin"),
+  localUserDepartments: document.querySelector("#localUserDepartments"),
+  localUserDepartmentList: document.querySelector("#localUserDepartmentList"),
   productNotice: document.querySelector("#productNotice")
 };
 
@@ -186,6 +208,109 @@ function showApp(authenticated, setupRequired = false) {
   el.logoutButton.classList.toggle("hidden", !authenticated);
 }
 
+function departmentName(departmentId) {
+  return state.departments.find((department) => department.id === departmentId)?.name || "-";
+}
+
+function fillDepartmentSelect(select, selectedId) {
+  select.replaceChildren();
+  state.departments.forEach((department) => {
+    const option = document.createElement("option");
+    option.value = String(department.id);
+    option.textContent = department.enabled ? department.name : `${department.name} (disabled)`;
+    select.append(option);
+  });
+  if (selectedId) select.value = String(selectedId);
+}
+
+function populateDepartmentSelects() {
+  fillDepartmentSelect(el.linkDepartment, Number(el.linkDepartment.value) || null);
+  fillDepartmentSelect(el.locationDepartment, Number(el.locationDepartment.value) || null);
+}
+
+function renderDepartmentCheckboxes(selectedIds = []) {
+  el.localUserDepartmentList.replaceChildren();
+  state.departments.forEach((department) => {
+    const label = document.createElement("label");
+    label.className = "check-field";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = String(department.id);
+    input.checked = selectedIds.includes(department.id);
+    const text = document.createElement("span");
+    text.textContent = department.public ? `${department.name} (everyone)` : department.name;
+    label.append(input, text);
+    el.localUserDepartmentList.append(label);
+  });
+  updateDepartmentPickerState();
+}
+
+function selectedUserDepartments() {
+  return [...el.localUserDepartmentList.querySelectorAll("input:checked")].map((input) =>
+    Number(input.value)
+  );
+}
+
+function updateDepartmentPickerState() {
+  // An administrator already sees everything, so the picker only matters for a
+  // viewer account.
+  const isAdmin = el.localUserIsAdmin.checked;
+  el.localUserDepartments.classList.toggle("dimmed", isAdmin);
+  el.localUserDepartmentList
+    .querySelectorAll("input")
+    .forEach((input) => { input.disabled = isAdmin; });
+}
+
+function createDepartmentButton(department) {
+  const button = document.createElement("button");
+  button.className = "list-item";
+  if (department.id === state.selectedDepartmentId) button.classList.add("active");
+  button.type = "button";
+  button.innerHTML = `
+    <span class="list-title"></span>
+    <span class="list-meta"></span>
+  `;
+  button.querySelector(".list-title").textContent = department.name;
+  const notes = [department.slug];
+  if (department.public) notes.push("everyone");
+  if (!department.enabled) notes.push("disabled");
+  button.querySelector(".list-meta").textContent = notes.join(" - ");
+  button.addEventListener("click", () => selectDepartment(department.id));
+  return button;
+}
+
+function resetDepartmentForm() {
+  state.selectedDepartmentId = null;
+  el.departmentFormTitle.textContent = "Add department";
+  el.departmentId.value = "";
+  el.departmentName.value = "";
+  el.departmentSlug.value = "";
+  el.departmentDescription.value = "";
+  el.departmentSort.value = nextDepartmentSort();
+  el.departmentPublic.checked = false;
+  el.departmentEnabled.checked = true;
+  renderList();
+}
+
+function selectDepartment(id) {
+  const department = state.departments.find((item) => item.id === id);
+  if (!department) return;
+  state.selectedDepartmentId = id;
+  el.departmentFormTitle.textContent = "Edit department";
+  el.departmentId.value = department.id;
+  el.departmentName.value = department.name;
+  el.departmentSlug.value = department.slug;
+  el.departmentDescription.value = department.description || "";
+  el.departmentSort.value = department.sort_order;
+  el.departmentPublic.checked = Boolean(department.public);
+  el.departmentEnabled.checked = Boolean(department.enabled);
+  renderList();
+}
+
+function nextDepartmentSort() {
+  return Math.max(0, ...state.departments.map((d) => Number(d.sort_order) || 0)) + 10;
+}
+
 function locationName(code) {
   return state.locations.find((location) => location.code === code)?.name || "General";
 }
@@ -217,9 +342,19 @@ function renderList() {
     return;
   }
 
+  if (state.activeTab === "departments") {
+    const departments = state.departments.filter((department) =>
+      `${department.name} ${department.slug}`.toLowerCase().includes(query)
+    );
+    departments.forEach((department) => el.adminList.append(createDepartmentButton(department)));
+    setStatus(`${departments.length} of ${state.departments.length} departments`);
+    return;
+  }
+
   if (state.activeTab !== "locations") {
     const labels = {
       branding: "Site logo and titles",
+      departments: "Departmental views",
       data: "Bulk catalog tools",
       authentication: "Login and access settings"
     };
@@ -260,7 +395,13 @@ function renderAuthentication() {
     button.type = "button";
     button.innerHTML = '<span class="list-title"></span><span class="list-meta"></span>';
     button.querySelector(".list-title").textContent = user.username;
-    button.querySelector(".list-meta").textContent = user.enabled ? "Enabled local administrator" : "Disabled";
+    const role = user.is_admin ? "Administrator" : "Viewer";
+    const scope = user.is_admin
+      ? "every department"
+      : `${(user.department_ids || []).length} department(s)`;
+    button.querySelector(".list-meta").textContent = user.enabled
+      ? `${role} - ${scope}`
+      : `${role} - disabled`;
     button.addEventListener("click", () => selectLocalUser(user.id));
     el.localUserList.append(button);
   });
@@ -279,6 +420,7 @@ function renderAuthentication() {
   el.entraAdminUsers.value = entra.admin_users || "";
   el.entraAdminGroups.value = entra.admin_groups || "";
   el.entraAdminRoles.value = entra.admin_roles || "";
+  renderDepartmentCheckboxes(selectedUserDepartments());
   el.entraSecretState.textContent = entra.client_secret_set
     ? "A client secret is stored. Leave the field blank to keep it, or enter a new one to replace it."
     : "No client secret is stored yet. One is required before Entra login can be enabled.";
@@ -347,6 +489,8 @@ function resetLocalUser() {
   el.localUsername.value = "";
   el.localPassword.value = "";
   el.localUserEnabled.checked = true;
+  el.localUserIsAdmin.checked = true;
+  renderDepartmentCheckboxes([]);
 }
 
 function selectLocalUser(id) {
@@ -356,6 +500,8 @@ function selectLocalUser(id) {
   el.localUsername.value = user.username;
   el.localPassword.value = "";
   el.localUserEnabled.checked = Boolean(user.enabled);
+  el.localUserIsAdmin.checked = Boolean(user.is_admin);
+  renderDepartmentCheckboxes(user.department_ids || []);
 }
 
 function applyBranding() {
@@ -389,7 +535,8 @@ function createListButton(link) {
   button.querySelector(".list-title").textContent = link.name;
   button.querySelectorAll(".list-meta")[0].textContent =
     link.page_type === "general" ? "General" : `${locationName(link.location_code)} - ${link.link_type}`;
-  button.querySelectorAll(".list-meta")[1].textContent = `${link.group_name}${link.enabled ? "" : " - hidden"}`;
+  button.querySelectorAll(".list-meta")[1].textContent =
+    `${departmentName(link.department_id)} - ${link.group_name}${link.enabled ? "" : " - hidden"}`;
   button.addEventListener("click", () => selectLink(link.id));
   return button;
 }
@@ -404,7 +551,8 @@ function createLocationButton(location) {
     <span class="list-meta"></span>
   `;
   button.querySelector(".list-title").textContent = location.name;
-  button.querySelector(".list-meta").textContent = `${location.code}${location.enabled ? "" : " - hidden"}`;
+  button.querySelector(".list-meta").textContent =
+    `${location.code} - ${departmentName(location.department_id)}${location.enabled ? "" : " - hidden"}`;
   button.addEventListener("click", () => selectLocation(location.id));
   return button;
 }
@@ -422,6 +570,7 @@ function resetLinkForm() {
   el.linkGroup.value = "Operations";
   el.linkCluster.value = "";
   el.linkEnabled.checked = true;
+  fillDepartmentSelect(el.linkDepartment, state.departments[0]?.id);
   updateLinkLocationState();
   renderList();
 }
@@ -435,6 +584,7 @@ function selectLink(id) {
   el.pageType.value = link.page_type;
   el.linkLocation.value = link.location_code || state.locations[0]?.code || "";
   el.linkType.value = link.link_type;
+  fillDepartmentSelect(el.linkDepartment, link.department_id);
   el.linkSort.value = link.sort_order;
   el.linkName.value = link.name;
   el.linkUrl.value = link.url;
@@ -454,6 +604,7 @@ function resetLocationForm() {
   el.locationCode.value = "";
   el.locationSort.value = nextLocationSort();
   el.locationEnabled.checked = true;
+  fillDepartmentSelect(el.locationDepartment, state.departments[0]?.id);
   renderList();
 }
 
@@ -465,6 +616,7 @@ function selectLocation(id) {
   el.locationId.value = location.id;
   el.locationName.value = location.name;
   el.locationCode.value = location.code;
+  fillDepartmentSelect(el.locationDepartment, location.department_id);
   el.locationSort.value = location.sort_order;
   el.locationEnabled.checked = Boolean(location.enabled);
   renderList();
@@ -481,6 +633,11 @@ function nextLocationSort() {
 function updateLinkLocationState() {
   const isLocation = el.pageType.value === "location";
   el.linkLocation.disabled = !isLocation;
+  el.linkDepartment.disabled = isLocation;
+  if (isLocation) {
+    const owner = state.locations.find((location) => location.code === el.linkLocation.value);
+    if (owner) fillDepartmentSelect(el.linkDepartment, owner.department_id);
+  }
   if (!isLocation) {
     el.linkType.value = "general";
     el.linkGroup.placeholder = "Operations";
@@ -493,6 +650,7 @@ function switchTab(tab) {
   el.tabButtons.forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
   el.linksEditor.classList.toggle("hidden", tab !== "links");
   el.locationsEditor.classList.toggle("hidden", tab !== "locations");
+  el.departmentsEditor.classList.toggle("hidden", tab !== "departments");
   el.brandingEditor.classList.toggle("hidden", tab !== "branding");
   el.dataEditor.classList.toggle("hidden", tab !== "data");
   el.authenticationEditor.classList.toggle("hidden", tab !== "authentication");
@@ -505,9 +663,13 @@ async function refreshAdmin() {
   const [payload, auth] = await Promise.all([api("/api/admin"), api("/api/auth-config")]);
   state.locations = payload.locations;
   state.links = payload.links;
+  state.departments = payload.departments || [];
+  state.requireLogin = Boolean(payload.require_login);
   state.branding = payload.branding;
   applyProductNotice(payload.product);
   state.auth = auth;
+  el.requireLogin.checked = state.requireLogin;
+  populateDepartmentSelects();
   populateLocationSelect();
   applyBranding();
   renderAuthentication();
@@ -525,6 +687,7 @@ async function checkSession() {
     await refreshAdmin();
     resetLinkForm();
     resetLocationForm();
+    resetDepartmentForm();
   }
 }
 
@@ -609,6 +772,68 @@ el.newLinkButton.addEventListener("click", resetLinkForm);
 el.newLocationButton.addEventListener("click", resetLocationForm);
 el.pageType.addEventListener("change", updateLinkLocationState);
 el.newLocalUserButton.addEventListener("click", resetLocalUser);
+el.newDepartmentButton.addEventListener("click", resetDepartmentForm);
+el.localUserIsAdmin.addEventListener("change", updateDepartmentPickerState);
+el.linkLocation.addEventListener("change", updateLinkLocationState);
+
+el.departmentForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const updated = await api("/api/departments", {
+      method: "POST",
+      body: JSON.stringify({
+        id: el.departmentId.value || null,
+        name: el.departmentName.value,
+        slug: el.departmentSlug.value,
+        description: el.departmentDescription.value,
+        public: el.departmentPublic.checked,
+        sort_order: Number(el.departmentSort.value) || 0,
+        enabled: el.departmentEnabled.checked
+      })
+    });
+    state.departments = updated.departments;
+    state.locations = updated.locations;
+    state.links = updated.links;
+    populateDepartmentSelects();
+    renderDepartmentCheckboxes(selectedUserDepartments());
+    resetDepartmentForm();
+    setStatus("Department saved.");
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+el.deleteDepartmentButton.addEventListener("click", async () => {
+  if (!state.selectedDepartmentId) return;
+  if (!confirm("Delete this department?")) return;
+  try {
+    const updated = await api(`/api/departments/${state.selectedDepartmentId}`, { method: "DELETE" });
+    state.departments = updated.departments;
+    state.locations = updated.locations;
+    state.links = updated.links;
+    populateDepartmentSelects();
+    renderDepartmentCheckboxes(selectedUserDepartments());
+    resetDepartmentForm();
+    setStatus("Department deleted.");
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+el.savePortalSettings.addEventListener("click", async () => {
+  try {
+    const updated = await api("/api/portal-settings", {
+      method: "POST",
+      body: JSON.stringify({ require_login: el.requireLogin.checked })
+    });
+    state.requireLogin = Boolean(updated.require_login);
+    el.requireLogin.checked = state.requireLogin;
+    setStatus(state.requireLogin ? "Sign-in is now required." : "Anonymous viewing is allowed.");
+  } catch (error) {
+    el.requireLogin.checked = state.requireLogin;
+    alert(error.message);
+  }
+});
 wireDialog(el.adConfigureButton, el.adDialog, el.adDialogClose);
 wireDialog(el.entraConfigureButton, el.entraDialog, el.entraDialogClose);
 el.brandingLogo.addEventListener("change", () => {
@@ -695,13 +920,15 @@ el.localUserForm.addEventListener("submit", async (event) => {
         id: el.localUserId.value || null,
         username: el.localUsername.value,
         password: el.localPassword.value,
-        enabled: el.localUserEnabled.checked
+        enabled: el.localUserEnabled.checked,
+        is_admin: el.localUserIsAdmin.checked,
+        department_ids: selectedUserDepartments()
       })
     });
     state.auth = updated;
     renderAuthentication();
     resetLocalUser();
-    setStatus("Local administrator saved.");
+    setStatus("Account saved.");
   } catch (error) {
     alert(error.message);
   }
@@ -713,7 +940,7 @@ el.deleteLocalUserButton.addEventListener("click", async () => {
     state.auth = await api(`/api/admin-users/${el.localUserId.value}`, { method: "DELETE" });
     renderAuthentication();
     resetLocalUser();
-    setStatus("Local administrator deleted.");
+    setStatus("Account deleted.");
   } catch (error) {
     alert(error.message);
   }
@@ -750,6 +977,7 @@ el.linkForm.addEventListener("submit", async (event) => {
       page_type: el.pageType.value,
       location_code: el.pageType.value === "location" ? el.linkLocation.value : null,
       link_type: el.linkType.value,
+      department_id: Number(el.linkDepartment.value) || null,
       sort_order: Number(el.linkSort.value) || 0,
       name: el.linkName.value,
       url: el.linkUrl.value,
@@ -761,6 +989,7 @@ el.linkForm.addEventListener("submit", async (event) => {
     const updated = await api("/api/links", { method: "POST", body: JSON.stringify(payload) });
     state.locations = updated.locations;
     state.links = updated.links;
+    state.departments = updated.departments || state.departments;
     populateLocationSelect();
     renderList();
     setStatus("Link saved.");
@@ -785,12 +1014,14 @@ el.locationForm.addEventListener("submit", async (event) => {
       id: el.locationId.value || null,
       name: el.locationName.value,
       code: el.locationCode.value,
+      department_id: Number(el.locationDepartment.value) || null,
       sort_order: Number(el.locationSort.value) || 0,
       enabled: el.locationEnabled.checked
     };
     const updated = await api("/api/locations", { method: "POST", body: JSON.stringify(payload) });
     state.locations = updated.locations;
     state.links = updated.links;
+    state.departments = updated.departments || state.departments;
     populateLocationSelect();
     renderList();
     setStatus("Location saved.");

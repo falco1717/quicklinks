@@ -513,7 +513,7 @@ def setup_required():
         return False
     with db() as conn:
         required = (
-            conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is None
+            conn.execute("SELECT 1 FROM admin_users WHERE is_admin = 1 LIMIT 1").fetchone() is None
             and not external_auth_enabled(conn)
         )
     if not required:
@@ -528,7 +528,7 @@ def create_initial_admin(username, password):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         already_usable = (
-            conn.execute("SELECT 1 FROM admin_users LIMIT 1").fetchone() is not None
+            conn.execute("SELECT 1 FROM admin_users WHERE is_admin = 1 LIMIT 1").fetchone() is not None
             or external_auth_enabled(conn)
         )
         if already_usable:
@@ -1639,10 +1639,10 @@ class AppHandler(SimpleHTTPRequestHandler):
         with db() as conn:
             if user_id:
                 existing = conn.execute(
-                    "SELECT username FROM admin_users WHERE id = ?", (user_id,)
+                    "SELECT username, is_admin FROM admin_users WHERE id = ?", (user_id,)
                 ).fetchone()
                 if not existing:
-                    raise ValueError("Local administrator not found.")
+                    raise ValueError("Account not found.")
                 if password:
                     conn.execute(
                         "UPDATE admin_users SET username = ?, password_hash = ?, enabled = ?, "
@@ -1655,6 +1655,17 @@ class AppHandler(SimpleHTTPRequestHandler):
                         (username, enabled, is_admin, user_id),
                     )
                 assign_user_departments(conn, user_id, department_ids)
+                if existing["is_admin"] and (not is_admin or not enabled):
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) AS count FROM admin_users "
+                        "WHERE enabled = 1 AND is_admin = 1 AND id != ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                    if not remaining and not external_auth_enabled(conn):
+                        raise ValueError(
+                            "This is the only administrator. Promote another account first, "
+                            "or enable a directory."
+                        )
                 renamed = username.lower() != existing["username"].lower()
                 if password or renamed or not enabled:
                     revoke_sessions(conn, "local", existing["username"])
@@ -1674,17 +1685,17 @@ class AppHandler(SimpleHTTPRequestHandler):
         user_id = clean_int(raw_id, 0)
         with db() as conn:
             enabled_count = conn.execute(
-                "SELECT COUNT(*) AS count FROM admin_users WHERE enabled = 1"
+                "SELECT COUNT(*) AS count FROM admin_users WHERE enabled = 1 AND is_admin = 1"
             ).fetchone()["count"]
             target = conn.execute(
-                "SELECT username, enabled FROM admin_users WHERE id = ?", (user_id,)
+                "SELECT username, enabled, is_admin FROM admin_users WHERE id = ?", (user_id,)
             ).fetchone()
             if not target:
-                raise ValueError("Local administrator not found.")
-            if target["enabled"] and enabled_count <= 1 and not external_auth_enabled(conn):
+                raise ValueError("Account not found.")
+            if target["enabled"] and target["is_admin"] and enabled_count <= 1 and not external_auth_enabled(conn):
                 raise ValueError(
                     "Keep one enabled local administrator until Active Directory "
-                    "or Microsoft Entra ID is enabled."
+                    "or Microsoft Entra ID is enabled. Viewer accounts do not count."
                 )
             conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
             revoke_sessions(conn, "local", target["username"])

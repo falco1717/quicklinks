@@ -1172,6 +1172,62 @@ class DepartmentTests(ServerTestCase):
         self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog()["departments"]])
         self.assertNotIn("facilities-team", [d["slug"] for d in self.catalog(self.admin)["departments"]])
 
+    # -- lockout guards, which viewer accounts broke ---------------------
+
+    def test_viewer_accounts_do_not_count_as_administrators(self):
+        """Deleting the only admin while a viewer exists would leave nobody in charge."""
+        self.make_viewer("it-viewer", ["it"])
+        users = self.json_body(self.request("GET", "/api/auth-config", token=self.admin))["users"]
+        owner_id = next(u["id"] for u in users if u["username"] == "owner")
+        response = self.request("DELETE", f"/api/admin-users/{owner_id}", token=self.admin)
+        self.assertEqual(response["status"], 400)
+        self.assertIn("administrator", self.json_body(response)["error"])
+        # And the administrator still works afterwards.
+        self.assertEqual(self.request("GET", "/api/admin", token=self.admin)["status"], 200)
+
+    def test_last_administrator_cannot_demote_themselves(self):
+        users = self.json_body(self.request("GET", "/api/auth-config", token=self.admin))["users"]
+        owner_id = next(u["id"] for u in users if u["username"] == "owner")
+        response = self.request(
+            "POST", "/api/admin-users",
+            {"id": owner_id, "username": "owner", "is_admin": False,
+             "department_ids": [self.departments["it"]]},
+            token=self.admin,
+        )
+        self.assertEqual(response["status"], 400)
+        self.assertIn("only administrator", self.json_body(response)["error"])
+
+    def test_last_administrator_cannot_disable_themselves(self):
+        users = self.json_body(self.request("GET", "/api/auth-config", token=self.admin))["users"]
+        owner_id = next(u["id"] for u in users if u["username"] == "owner")
+        response = self.request(
+            "POST", "/api/admin-users",
+            {"id": owner_id, "username": "owner", "is_admin": True, "enabled": False},
+            token=self.admin,
+        )
+        self.assertEqual(response["status"], 400)
+        self.assertIn("only administrator", self.json_body(response)["error"])
+
+    def test_demotion_is_allowed_once_another_administrator_exists(self):
+        self.request("POST", "/api/admin-users",
+                     {"username": "second-admin", "password": PASSWORD, "is_admin": True},
+                     token=self.admin)
+        users = self.json_body(self.request("GET", "/api/auth-config", token=self.admin))["users"]
+        owner_id = next(u["id"] for u in users if u["username"] == "owner")
+        response = self.request(
+            "POST", "/api/admin-users",
+            {"id": owner_id, "username": "owner", "is_admin": False,
+             "department_ids": [self.departments["it"]]},
+            token=self.admin,
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+
+    def test_setup_stays_closed_when_only_viewers_remain(self):
+        """An install with viewers but no administrator still needs first-run setup."""
+        self.make_viewer("it-viewer", ["it"])
+        server.reset_runtime_state()
+        self.assertFalse(server.setup_required())  # an admin still exists
+
     def test_public_department_is_visible_to_signed_in_viewers(self):
         """Signing in must never lose you access to a company-wide department."""
         self.add_content("general", "HQ", "hq")

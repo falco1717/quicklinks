@@ -141,6 +141,40 @@
   font-size: 0.84rem;
 }
 
+.department-picker {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0;
+  background: var(--link-bg);
+}
+
+.department-picker legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+/* An administrator already sees every department, so the picker is shown but
+   visibly inert rather than removed -- the checkboxes still say what a viewer
+   would get if the flag were turned off. */
+.department-picker.dimmed {
+  opacity: 0.55;
+}
+
+.checkbox-list {
+  display: grid;
+  gap: 2px;
+}
+
+.checkbox-list .check-field {
+  min-height: 32px;
+  font-weight: 400;
+}
+
 .provider-list {
   display: grid;
   gap: 10px;
