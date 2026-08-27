@@ -456,6 +456,15 @@
             <input id="adSsl" type="checkbox" checked>
             <span>Use LDAPS encryption</span>
           </label>
+          <label class="check-field">
+            <input id="adTlsVerify" type="checkbox" checked>
+            <span>Verify the domain controller certificate</span>
+          </label>
+          <label class="field">
+            <span>CA certificate file</span>
+            <input id="adCaFile" type="text" placeholder="Optional, e.g. /app/data/enterprise-ca.pem">
+          </label>
+          <p class="field-help">Encryption alone proves nothing about who answered. With verification on, the certificate must be issued by a trusted authority and match the AD server name. Enterprise CAs are not in the container's trust store, so point the field above at a PEM copy of your root CA and mount it into the container.</p>
           <p class="field-help">Users authenticate directly against Active Directory. No Entra ID or service account is required.</p>
           <button class="primary-button" type="submit">Save AD settings</button>
         </form>

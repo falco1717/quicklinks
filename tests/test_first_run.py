@@ -1,10 +1,16 @@
 import gc
 import os
 import tempfile
+import secrets
 import unittest
 from pathlib import Path
 
 import server
+
+
+# Generated per run: see the note in test_http.py. Kept above the seven
+# character floor `password_hash` enforces.
+SETUP_PASSWORD = "setup-" + secrets.token_urlsafe(12)
 
 
 class FirstRunTests(unittest.TestCase):
@@ -51,18 +57,18 @@ class FirstRunTests(unittest.TestCase):
 
     def test_setup_creates_one_admin_and_rejects_second_attempt(self):
         server.ensure_database()
-        server.create_initial_admin("owner", "1234567")
+        server.create_initial_admin("owner", SETUP_PASSWORD)
         self.assertFalse(server.setup_required())
-        self.assertTrue(server.authenticate_local("owner", "1234567"))
+        self.assertTrue(server.authenticate_local("owner", SETUP_PASSWORD))
         with self.assertRaisesRegex(ValueError, "already been completed"):
-            server.create_initial_admin("attacker", "1234567")
+            server.create_initial_admin("attacker", SETUP_PASSWORD)
 
     def test_environment_credentials_seed_first_admin(self):
         server.ADMIN_USERNAME = "provisioned-user"
-        server.ADMIN_PASSWORD = "1234567"
+        server.ADMIN_PASSWORD = SETUP_PASSWORD
         server.ensure_database()
         self.assertFalse(server.setup_required())
-        self.assertTrue(server.authenticate_local("provisioned-user", "1234567"))
+        self.assertTrue(server.authenticate_local("provisioned-user", SETUP_PASSWORD))
 
     def test_partial_environment_credentials_fail_startup(self):
         server.ADMIN_USERNAME = "owner"

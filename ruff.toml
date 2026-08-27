@@ -1,0 +1,32 @@
+# Lint and security configuration.
+#
+# The rule families here are the ones an external security scan reports on, so
+# a finding shows up during development rather than in someone else's audit.
+# `S` is flake8-bandit: hardcoded credentials, SQL string building, unsafe URL
+# handling, binding to every interface.
+
+target-version = "py39"      # the floor documented in the deployment guides
+line-length = 160            # long lines are deliberate here; E501 is not the point
+
+[lint]
+select = [
+    "S",     # flake8-bandit, the security rules
+    "B",     # flake8-bugbear
+    "F",     # pyflakes
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "A",     # builtin shadowing
+    "C4",    # comprehension correctness
+    "RUF",   # ruff's own rules, including unused-noqa
+]
+ignore = [
+    "E501",  # see line-length above
+    "E741",  # `l` reads fine as a loop variable in this codebase
+    "E731",  # a lambda assignment is clearer than a def in the DELETE routes
+]
+
+[lint.per-file-ignores]
+# Test fixtures build assertions from literal values on purpose. Credentials are
+# still generated rather than written down -- see the note at the top of
+# tests/test_http.py -- so S105/S106/S107 stay switched on everywhere.
+"tests/*" = ["S101"]

@@ -1,0 +1,69 @@
+name: Security
+
+# The same rule families an external security review reports on, so a finding
+# lands on a pull request rather than in someone else's audit. Each job fails
+# the build; nothing here is advisory.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Dependency advisories appear without anyone touching the code, so this
+    # also runs weekly against an unchanged tree.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  code:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff bandit
+
+      # Includes S (flake8-bandit): hardcoded credentials, SQL built by string
+      # formatting, unsafe URL handling, binding every interface. Configured in
+      # ruff.toml, which also documents every suppression.
+      - name: ruff
+        run: ruff check --output-format github .
+
+      # A second implementation of the same checks, over the application only.
+      # See the comments in bandit.yaml for why the test tree is ruff's job.
+      - name: bandit
+        run: bandit -c bandit.yaml -r . --severity-level low
+
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - name: pip-audit
+        run: pip-audit -r requirements.txt --strict --progress-spinner off
+
+  secrets:
+    name: Committed secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A secret is still a secret after the commit that removed it, so the
+          # whole history is scanned rather than the tip.
+          fetch-depth: 0
+      # Run directly rather than through the gitleaks action, which wants a
+      # licence key for organisation-owned repositories.
+      - name: gitleaks
+        run: |
+          version=8.30.1
+          curl -sSLo gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1

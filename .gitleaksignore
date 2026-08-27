@@ -1,0 +1,25 @@
+# Findings acknowledged after review, by fingerprint.
+#
+# Every entry below is a test fixture or a JSON key from a commit before
+# 2026.08.14.001 -- none was ever a real credential, and none is present at the
+# tip. They are listed rather than dropped from the scan so that history stays
+# in scope: a secret that was committed and then removed is still a secret, and
+# a future one has to be rotated, not ignored.
+#
+#   tests/test_http.py  fixed passwords used to build assertions; these are now
+#                       generated per run, see the note at the top of that file
+#   admin.js            the "token" key of the ENTRA_ERRORS message map, since
+#                       renamed to "unverified"
+
+349acfa4968eed925956c006af62b2e85a778856:admin.js:generic-secret-assignment:117
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:22
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:251
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:256
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:341
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:342
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:351
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:354
+7cbd22504f2cf227a7a467860f25e21fcb4bd9c5:tests/test_http.py:generic-secret-assignment:364
+349acfa4968eed925956c006af62b2e85a778856:tests/test_http.py:generic-secret-assignment:611
+3f39f44a7d57273649783d0c8216908ec6aa24f2:tests/test_http.py:generic-secret-assignment:988
+3f39f44a7d57273649783d0c8216908ec6aa24f2:tests/test_http.py:generic-secret-assignment:1128

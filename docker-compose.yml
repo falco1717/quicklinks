@@ -11,3 +11,17 @@ services:
       SESSION_SECRET: "${SESSION_SECRET:-}"
     volumes:
       - ./data:/app/data
+
+    # The image already runs as uid 1000 and needs nothing else. Dropping every
+    # capability means a root process could not bypass file modes either, which
+    # is why ./data has to be owned by 1000 rather than left to root -- run
+    # `sudo chown -R 1000:1000 ./data` once when upgrading from an older image.
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    # SQLite puts its temporary files here when a statement needs to spill.
+    tmpfs:
+      - /tmp

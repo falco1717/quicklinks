@@ -94,6 +94,8 @@ const el = {
   adEnabled: document.querySelector("#adEnabled"),
   adServer: document.querySelector("#adServer"),
   adSsl: document.querySelector("#adSsl"),
+  adTlsVerify: document.querySelector("#adTlsVerify"),
+  adCaFile: document.querySelector("#adCaFile"),
   adDomain: document.querySelector("#adDomain"),
   adAdminUsers: document.querySelector("#adAdminUsers"),
   adAdminGroups: document.querySelector("#adAdminGroups"),
@@ -146,7 +148,7 @@ const ENTRA_ERRORS = {
   config: "Microsoft Entra ID sign-in is not configured yet. An administrator can set it up under Authentication.",
   denied: "Microsoft did not complete the sign-in. You can try again or use a local account.",
   state: "That sign-in could not be matched to this browser. Start again from this page.",
-  token: "The Microsoft sign-in could not be verified. Check the server log for details.",
+  unverified: "The Microsoft sign-in could not be verified. Check the server log for details.",
   forbidden: "That Microsoft account is not an allowed QuickLinks administrator."
 };
 
@@ -408,6 +410,8 @@ function renderAuthentication() {
   el.adEnabled.checked = Boolean(ad.enabled);
   el.adServer.value = ad.server || "";
   el.adSsl.checked = ad.ssl !== false;
+  el.adTlsVerify.checked = ad.tls_verify !== false;
+  el.adCaFile.value = ad.ca_file || "";
   el.adDomain.value = ad.domain || "";
   el.adAdminUsers.value = ad.admin_users || "";
   el.adAdminGroups.value = ad.admin_groups || "";
@@ -956,6 +960,8 @@ el.adForm.addEventListener("submit", async (event) => {
         server: el.adServer.value,
         port: el.adSsl.checked ? 636 : 389,
         ssl: el.adSsl.checked,
+        tls_verify: el.adTlsVerify.checked,
+        ca_file: el.adCaFile.value,
         domain: el.adDomain.value,
         admin_users: el.adAdminUsers.value,
         admin_groups: el.adAdminGroups.value

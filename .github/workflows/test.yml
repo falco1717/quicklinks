@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# The default token grants write access on push events. Nothing here needs it.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,4 +18,60 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
+
+  container:
+    # Proves the hardened runtime actually works rather than only building. The
+    # image runs unprivileged with a read-only root filesystem and no
+    # capabilities, so this is the check that SQLite can still write its
+    # database -- the failure mode that took the July deployment down.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - run: docker build -t quicklinks:test .
+
+      - name: The image must not run as root
+        run: |
+          uid="$(docker run --rm quicklinks:test id -u)"
+          echo "container uid: $uid"
+          [ "$uid" != "0" ] || { echo "image runs as root" >&2; exit 1; }
+
+      - name: Start it the way the compose file does
+        run: |
+          mkdir -p smoke-data
+          sudo chown 1000:1000 smoke-data
+          docker run -d --name ql-smoke \
+            --user 1000:1000 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --read-only --tmpfs /tmp \
+            -v "$PWD/smoke-data:/app/data" \
+            -p 6969:6969 \
+            quicklinks:test
+
+      - name: It must answer, and it must be able to write
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:6969/api/product >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:6969/api/product
+
+          # Creating the first administrator is a write, so this fails if the
+          # unprivileged user cannot open the database read-write.
+          generated="$(openssl rand -hex 16)"
+          curl -fsS -X POST http://127.0.0.1:6969/api/setup \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"smoke\",\"password\":\"$generated\"}" \
+            -c cookies.txt
+
+          # And the session it just issued has to work on a later request.
+          curl -fsS http://127.0.0.1:6969/api/admin -b cookies.txt >/dev/null
+          test -s smoke-data/links.db || { echo "no database was written" >&2; exit 1; }
+
+      - name: Logs
+        if: always()
+        run: docker logs ql-smoke || true
+
+      - name: Stop
+        if: always()
+        run: docker rm -f ql-smoke || true
