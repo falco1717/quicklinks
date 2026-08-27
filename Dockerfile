@@ -29,6 +29,8 @@ ENV DATA_DIR=/app/data \
     PORT=6969
 EXPOSE 6969
 VOLUME ["/app/data"]
+# Exec form: no shell to word-split, and a non-zero exit from python already
+# marks the check failed, so no `|| exit 1` is needed.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6969/api/catalog', timeout=3)" || exit 1
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6969/api/catalog', timeout=3)"]
 CMD ["python", "server.py"]

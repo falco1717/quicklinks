@@ -897,8 +897,12 @@ def ad_tls_context(config, server_name, verify):
             "Active Directory certificate verification is off, so a bind to %s cannot "
             "tell the real domain controller from an impersonated one.", server_name,
         )
+    # Verification is the default: ad_tls_settings refuses an unencrypted bind
+    # while it is on, and CERT_NONE is reachable only when an administrator
+    # deliberately turns verification off for a self-signed controller. Every
+    # such bind logs the warning above.
     return Tls(
-        validate=ssl.CERT_REQUIRED if verify else ssl.CERT_NONE,
+        validate=ssl.CERT_REQUIRED if verify else ssl.CERT_NONE,  # nosemgrep: python.lang.security.unverified-ssl-context.unverified-ssl-context
         ca_certs_file=ca_file,
         # ldap3 checks the hostname itself after the handshake. SNI is sent so a
         # controller serving more than one name returns the right certificate.
@@ -1189,13 +1193,16 @@ def exchange_entra_code(config, code, verifier):
         ) as response:
             return json.loads(response.read(MAX_TOKEN_RESPONSE).decode())
     except urllib.error.HTTPError as error:
-        detail = error.read(MAX_TOKEN_RESPONSE).decode("utf-8", "replace")[:500]
-        LOGGER.warning("Entra token exchange rejected with %s: %s", error.code, detail)
+        detail = log_safe(error.read(MAX_TOKEN_RESPONSE).decode("utf-8", "replace"))
+        # `detail` is Microsoft's error body, flattened by log_safe. The client
+        # secret is never part of it and no local variable is interpolated here.
+        LOGGER.warning("Entra token exchange rejected with %s: %s", error.code, detail)  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         raise ValueError(
             "Microsoft rejected the sign-in. Check the client secret and redirect URI."
         ) from None
     except (urllib.error.URLError, OSError, ValueError) as error:
-        LOGGER.warning("Entra token exchange failed: %s", error)
+        # A transport exception, not a credential: the request body is not in it.
+        LOGGER.warning("Entra token exchange failed: %s", log_safe(error))  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         raise ValueError("Could not reach Microsoft to complete the sign-in.") from None
 
 
@@ -1508,6 +1515,18 @@ def prune_throttle(now):
         oldest = sorted(_throttle, key=lambda key: _throttle[key].get("seen", 0))
         for key in oldest[: len(_throttle) - THROTTLE_MAX_KEYS]:
             del _throttle[key]
+
+
+def log_safe(text, limit=500):
+    """Flatten untrusted text before it reaches a log line.
+
+    A remote error body can contain newlines, and a newline in a log file is a
+    record separator: without this, whatever the other end returns could forge
+    log entries of its own. Control characters go too, so a terminal reading
+    the log cannot be driven by them either.
+    """
+    flattened = " ".join(str(text).split())
+    return "".join(ch for ch in flattened if ch.isprintable())[:limit]
 
 
 def redact_query(text):

@@ -665,7 +665,9 @@ def id_token(**claims):
         "preferred_username": "owner@example.com",
     }
     payload.update(claims)
-    encode = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    def encode(raw):
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
     return ".".join([
         encode(b'{"alg":"RS256","typ":"JWT"}'),
         encode(json.dumps(payload).encode()),
@@ -1036,7 +1038,7 @@ class DepartmentTests(ServerTestCase):
                      {"page_type": "general", "name": "Unassigned", "url": "https://u.example.com",
                       "group_name": "Ops"}, token=self.admin)
         links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
-        self.assertEqual([l["department_id"] for l in links], [self.departments["general"]])
+        self.assertEqual([row["department_id"] for row in links], [self.departments["general"]])
         # And it is visible to an anonymous visitor, as it was before departments.
         self.assertEqual(len(self.catalog()["links"]), 1)
 
@@ -1050,8 +1052,8 @@ class DepartmentTests(ServerTestCase):
         self.add_content("facilities-team", "Plant", "pl")
         catalog = self.catalog()
         self.assertEqual([d["slug"] for d in catalog["departments"]], ["general"])
-        self.assertNotIn("dc", [l["location_code"] for l in catalog["links"]])
-        self.assertNotIn("pl", [l["location_code"] for l in catalog["links"]])
+        self.assertNotIn("dc", [row["location_code"] for row in catalog["links"]])
+        self.assertNotIn("pl", [row["location_code"] for row in catalog["links"]])
         self.assertFalse(catalog["viewer"]["authenticated"])
 
     def test_viewer_sees_only_assigned_departments(self):
@@ -1101,13 +1103,13 @@ class DepartmentTests(ServerTestCase):
         """A location link must never sit in a department that cannot see its location."""
         self.add_content("it", "Datacentre", "dc")
         payload = self.json_body(self.request("GET", "/api/admin", token=self.admin))
-        location_id = next(l["id"] for l in payload["locations"] if l["code"] == "dc")
+        location_id = next(row["id"] for row in payload["locations"] if row["code"] == "dc")
         self.request("POST", "/api/locations",
                      {"id": location_id, "name": "Datacentre", "code": "dc",
                       "department_id": self.departments["general"]}, token=self.admin)
         links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
-        moved = [l for l in links if l["page_type"] == "location" and l["location_code"] == "dc"]
-        self.assertEqual([l["department_id"] for l in moved], [self.departments["general"]])
+        moved = [row for row in links if row["page_type"] == "location" and row["location_code"] == "dc"]
+        self.assertEqual([row["department_id"] for row in moved], [self.departments["general"]])
 
     def test_location_link_ignores_a_submitted_department(self):
         self.request("POST", "/api/locations",
@@ -1118,7 +1120,7 @@ class DepartmentTests(ServerTestCase):
                       "url": "https://t.example.com", "group_name": "Std",
                       "department_id": self.departments["facilities-team"]}, token=self.admin)
         links = self.json_body(self.request("GET", "/api/admin", token=self.admin))["links"]
-        self.assertEqual([l["department_id"] for l in links], [self.departments["it"]])
+        self.assertEqual([row["department_id"] for row in links], [self.departments["it"]])
 
     # -- require_login ---------------------------------------------------
 
