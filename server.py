@@ -89,6 +89,21 @@ UNSERVABLE = "__quicklinks_forbidden__"
 # else (http, https, smb, rdp, mailto, host:port, relative paths) stays usable.
 BLOCKED_URL_SCHEMES = {"javascript", "data", "vbscript", "blob", "about", "filesystem"}
 
+# A leading =, +, -, @, tab, or CR makes a spreadsheet evaluate a cell rather
+# than display it. Prefixing with an apostrophe keeps the text visible and
+# inert, and Excel does not display the apostrophe itself.
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+# Logos are identified by these signatures rather than by the type the browser
+# claimed, so the stored extension always matches the actual bytes.
+LOGO_SIGNATURES = (
+    ("image/png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+    ("image/jpeg", lambda data: data.startswith(b"\xff\xd8\xff")),
+    ("image/webp", lambda data: data[:4] == b"RIFF" and data[8:12] == b"WEBP"),
+)
+
+QUERY_STRING = re.compile(r"\?\S*")
+
 MAX_REQUEST_BODY = 12 * 1024 * 1024
 MAX_CSV_BYTES = 5 * 1024 * 1024
 MAX_LOGO_BYTES = 5 * 1024 * 1024
@@ -186,6 +201,29 @@ def process_identity():
     return name
 
 
+def write_new_secret(path):
+    """Create the session secret readable only by this account.
+
+    Writing the file and calling chmod afterwards leaves a window in which the
+    signing secret is readable by everyone on the host, and that secret is
+    enough on its own to mint an administrator session. O_EXCL also means two
+    workers starting together cannot overwrite each other's secret and
+    invalidate the sessions the other just issued.
+    """
+    secret = secrets.token_urlsafe(48)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return path.read_text(encoding="utf-8").strip()
+    try:
+        os.write(descriptor, secret.encode())
+    finally:
+        os.close(descriptor)
+    return secret
+
+
 def ensure_data_directory():
     """Confirm DATA_DIR exists and is writable, and say so plainly if not.
 
@@ -232,12 +270,7 @@ def ensure_database():
         if secret_path.exists():
             SESSION_SECRET = secret_path.read_text(encoding="utf-8").strip()
         else:
-            SESSION_SECRET = secrets.token_urlsafe(48)
-            secret_path.write_text(SESSION_SECRET, encoding="utf-8")
-            try:
-                secret_path.chmod(0o600)
-            except OSError:
-                pass
+            SESSION_SECRET = write_new_secret(secret_path)
     # Schema work runs on a connection with foreign keys left off so that table
     # rebuilds are possible; PRAGMA foreign_keys is also a no-op inside a
     # transaction, which the rebuild needs.
@@ -447,7 +480,8 @@ def migrate_links_cascade(conn):
         conn.execute("ALTER TABLE links RENAME TO links_pre_cascade")
         conn.execute(LINKS_TABLE_SQL.format(if_not_exists=""))
         conn.execute(
-            f"INSERT INTO links({LINK_COLUMNS}) SELECT {LINK_COLUMNS} FROM links_pre_cascade"
+            # LINK_COLUMNS is a module constant, not input.
+            f"INSERT INTO links({LINK_COLUMNS}) SELECT {LINK_COLUMNS} FROM links_pre_cascade"  # noqa: S608
         )
         conn.execute("DROP TABLE links_pre_cascade")
     conn.execute(
@@ -624,7 +658,8 @@ def catalog_payload(identity=None):
             ids = list(allowed)
             locations = rows_to_dicts(
                 conn.execute(
-                    "SELECT name, code, department_id FROM locations "
+                    # `placeholders` is a string of "?" -- the ids are bound below.
+                    "SELECT name, code, department_id FROM locations "  # noqa: S608
                     f"WHERE enabled = 1 AND department_id IN ({placeholders}) "
                     "ORDER BY sort_order, name",
                     ids,
@@ -632,7 +667,7 @@ def catalog_payload(identity=None):
             )
             links = rows_to_dicts(
                 conn.execute(
-                    "SELECT id, page_type, location_code, link_type, name, url, description, "
+                    "SELECT id, page_type, location_code, link_type, name, url, description, "  # noqa: S608
                     "group_name, cluster, sort_order, department_id "
                     f"FROM links WHERE enabled = 1 AND department_id IN ({placeholders}) "
                     "ORDER BY sort_order, id",
@@ -689,7 +724,7 @@ def admin_payload():
 def setting_values(conn, keys):
     placeholders = ",".join("?" for _ in keys)
     rows = conn.execute(
-        f"SELECT key, value FROM settings WHERE key IN ({placeholders})", keys
+        f"SELECT key, value FROM settings WHERE key IN ({placeholders})", keys  # noqa: S608
     ).fetchall()
     return {row["key"]: row["value"] for row in rows}
 
@@ -712,6 +747,7 @@ def auth_payload():
     keys = [
         "ad_enabled", "ad_server", "ad_port", "ad_ssl", "ad_domain",
         "ad_base_dn", "ad_group_dn", "ad_admin_users", "ad_admin_groups",
+        "ad_tls_verify", "ad_ca_file",
     ]
     with db() as conn:
         settings = setting_values(conn, keys)
@@ -749,6 +785,10 @@ def auth_payload():
             "domain": settings.get("ad_domain", ""),
             "admin_users": settings.get("ad_admin_users", ""),
             "admin_groups": settings.get("ad_admin_groups", settings.get("ad_group_dn", "")),
+            # Defaults to on. An install predating this setting has no row, which
+            # reads as "verify" rather than inheriting the old unchecked behaviour.
+            "tls_verify": settings.get("ad_tls_verify", "1") != "0",
+            "ca_file": settings.get("ad_ca_file", ""),
         },
     }
 
@@ -794,7 +834,7 @@ def save_directory_user(conn, source, username, is_admin, group_refs):
         return
     placeholders = ",".join("?" for _ in group_refs)
     mapped = conn.execute(
-        f"SELECT DISTINCT department_id FROM directory_departments "
+        f"SELECT DISTINCT department_id FROM directory_departments "  # noqa: S608
         f"WHERE source = ? AND group_ref IN ({placeholders})",
         [source, *group_refs],
     ).fetchall()
@@ -822,12 +862,70 @@ def authenticate_local(username, password):
     return user["username"] if user and matched else None
 
 
+def ad_tls_settings(config):
+    """Decide how to secure an AD bind, refusing to downgrade silently.
+
+    ldap3 builds a `Tls` object with `validate=ssl.CERT_NONE` when none is
+    supplied, so `use_ssl=True` on its own encrypts the bind without checking
+    who is on the other end: anyone on the path can present any certificate,
+    terminate the session, and read the administrator's password. This returns
+    an explicit posture rather than relying on that default.
+    """
+    verify = config.get("ad_tls_verify", "1") != "0"
+    use_ssl = config.get("ad_ssl", "1") == "1"
+    if verify and not use_ssl:
+        raise ValueError(
+            "Active Directory is set to an unencrypted connection, which would send "
+            "the password in the clear. Enable LDAPS, or turn off certificate "
+            "verification to accept that risk deliberately."
+        )
+    return verify, use_ssl
+
+
+def ad_tls_context(config, server_name, verify):
+    """Build the Tls object for an LDAPS bind."""
+    from ldap3 import Tls
+
+    ca_file = (config.get("ad_ca_file") or "").strip() or None
+    if ca_file and not os.path.isfile(ca_file):
+        raise ValueError(
+            f"The CA certificate file {ca_file} was not found. Mount it into this "
+            "deployment and enter the path it has there, not the path on your workstation."
+        )
+    if not verify:
+        LOGGER.warning(
+            "Active Directory certificate verification is off, so a bind to %s cannot "
+            "tell the real domain controller from an impersonated one.", server_name,
+        )
+    return Tls(
+        validate=ssl.CERT_REQUIRED if verify else ssl.CERT_NONE,
+        ca_certs_file=ca_file,
+        # ldap3 checks the hostname itself after the handshake. SNI is sent so a
+        # controller serving more than one name returns the right certificate.
+        sni=server_name,
+    )
+
+
+def certificate_failure(error):
+    """True when an ldap3 failure was the certificate check, not the password."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ssl.SSLCertVerificationError):
+            return True
+        if "certificate" in str(error).lower():
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def authenticate_ad(username, password):
     with db() as conn:
         config = setting_values(
             conn, [
                 "ad_enabled", "ad_server", "ad_port", "ad_ssl", "ad_domain",
                 "ad_admin_users", "ad_admin_groups", "ad_group_dn",
+                "ad_tls_verify", "ad_ca_file",
             ]
         )
     if config.get("ad_enabled") != "1" or not username or not password:
@@ -836,7 +934,9 @@ def authenticate_ad(username, password):
         from ldap3 import Connection, Server, SIMPLE, SUBTREE
         from ldap3.utils.conv import escape_filter_chars
     except ImportError:
-        raise ValueError("Active Directory support needs the ldap3 package, which is not installed.")
+        raise ValueError(
+            "Active Directory support needs the ldap3 package, which is not installed."
+        ) from None
 
     domain = config.get("ad_domain", "").strip()
     if not domain:
@@ -844,10 +944,12 @@ def authenticate_ad(username, password):
     server_name = config.get("ad_server", "").strip() or discover_domain_controller(domain)
     base_dn = domain_to_base_dn(domain)
     bind_name = username if "@" in username or "\\" in username else f"{username}@{domain}"
+    verify, use_ssl = ad_tls_settings(config)
     server = Server(
         server_name,
         port=clean_int(config.get("ad_port"), 636),
-        use_ssl=config.get("ad_ssl", "1") == "1",
+        use_ssl=use_ssl,
+        tls=ad_tls_context(config, server_name, verify) if use_ssl else None,
         connect_timeout=6,
     )
     try:
@@ -878,7 +980,7 @@ def authenticate_ad(username, password):
                 account_name,
             )
         return authorized
-    except Exception:
+    except Exception as error:
         # Bad credentials look the same as a misconfigured server to the client,
         # so log the real cause here instead of silently reporting "invalid
         # username or password" forever.
@@ -886,6 +988,16 @@ def authenticate_ad(username, password):
             "Active Directory authentication failed for %r against %s.",
             username, server_name, exc_info=True,
         )
+        # A rejected certificate is a configuration problem, not a wrong
+        # password, and reporting it as one sends people to reset passwords that
+        # were never wrong. Say what happened and how to fix it.
+        if verify and certificate_failure(error):
+            raise ValueError(
+                f"The certificate presented by {server_name} could not be verified. "
+                "Point 'CA certificate file' at the authority that issued it, use the "
+                "name on the certificate as the AD server, or turn off certificate "
+                "verification to accept it unchecked."
+            ) from None
         return False
 
 
@@ -1062,7 +1174,9 @@ def exchange_entra_code(config, code, verifier):
         "scope": ENTRA_SCOPE,
     }).encode()
     url = f"{ENTRA_AUTHORITY}/{quote(config['tenant_id'])}/oauth2/v2.0/token"
-    request = urllib.request.Request(
+    # url is built from the ENTRA_AUTHORITY literal and a validated GUID, so no
+    # caller can reach a scheme other than https.
+    request = urllib.request.Request(  # noqa: S310
         url, data=body, method="POST",
         headers={
             "Content-Type": "application/x-www-form-urlencoded",
@@ -1070,17 +1184,19 @@ def exchange_entra_code(config, code, verifier):
         },
     )
     try:
-        with urllib.request.urlopen(
+        with urllib.request.urlopen(  # noqa: S310  (see above)
             request, timeout=15, context=ssl.create_default_context()
         ) as response:
             return json.loads(response.read(MAX_TOKEN_RESPONSE).decode())
     except urllib.error.HTTPError as error:
         detail = error.read(MAX_TOKEN_RESPONSE).decode("utf-8", "replace")[:500]
         LOGGER.warning("Entra token exchange rejected with %s: %s", error.code, detail)
-        raise ValueError("Microsoft rejected the sign-in. Check the client secret and redirect URI.")
+        raise ValueError(
+            "Microsoft rejected the sign-in. Check the client secret and redirect URI."
+        ) from None
     except (urllib.error.URLError, OSError, ValueError) as error:
         LOGGER.warning("Entra token exchange failed: %s", error)
-        raise ValueError("Could not reach Microsoft to complete the sign-in.")
+        raise ValueError("Could not reach Microsoft to complete the sign-in.") from None
 
 
 def decode_jwt_claims(token):
@@ -1090,7 +1206,7 @@ def decode_jwt_claims(token):
     try:
         return json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
     except (ValueError, UnicodeDecodeError):
-        raise ValueError("Microsoft did not return a readable ID token.")
+        raise ValueError("Microsoft did not return a readable ID token.") from None
 
 
 def validate_entra_claims(claims, config, nonce, now=None):
@@ -1165,12 +1281,36 @@ def entra_authorized(claims, config):
     return False
 
 
+def csv_safe(value):
+    """Stop a spreadsheet treating an exported value as a formula.
+
+    The export exists to be opened in Excel or Sheets, so a link named
+    `=HYPERLINK("http://attacker","Payroll")` would run there rather than being
+    read. The apostrophe is reversed by `csv_plain` on import, so a round trip
+    through export and import still returns the original value.
+    """
+    text = "" if value is None else str(value)
+    return f"'{text}" if text.startswith(CSV_FORMULA_PREFIXES) else text
+
+
+def csv_plain(value):
+    """Undo `csv_safe`, and only that.
+
+    The apostrophe is dropped only when what follows would itself have been
+    escaped, so a value that genuinely starts with one survives an import.
+    """
+    text = "" if value is None else str(value)
+    if text.startswith("'") and text[1:].startswith(CSV_FORMULA_PREFIXES):
+        return text[1:]
+    return text
+
+
 def csv_text(rows):
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=CSV_FIELDS, lineterminator="\r\n")
     writer.writeheader()
     for row in rows:
-        writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+        writer.writerow({field: csv_safe(row.get(field, "")) for field in CSV_FIELDS})
     return output.getvalue()
 
 
@@ -1370,6 +1510,16 @@ def prune_throttle(now):
             del _throttle[key]
 
 
+def redact_query(text):
+    """Remove query strings from anything on its way to the log.
+
+    The Entra callback arrives as `GET /api/auth/entra/callback?code=...&state=...`,
+    so logging request lines verbatim writes single-use authorization codes and
+    the flow's state value to disk, and to whatever ships those logs onward.
+    """
+    return QUERY_STRING.sub("?<redacted>", text)
+
+
 def cookie_value(header, name):
     if not header:
         return None
@@ -1458,6 +1608,43 @@ class AppHandler(SimpleHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
+    def same_origin_request(self):
+        """True unless this looks like a write driven from another site.
+
+        `SameSite=Lax` already keeps the session cookie off cross-site POSTs in
+        a current browser, so this is a second and independent check rather than
+        the only one: it still holds where SameSite is not honoured, and it
+        refuses the request outright instead of quietly running it as anonymous.
+        Requests with no Origin at all -- curl, the import scripts -- are left
+        alone, because a browser always sends one on a cross-origin write.
+        """
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            return False
+        # `Sec-Fetch-Site` is a forbidden header name: only the browser sets it,
+        # and a page on another origin cannot make it say `same-origin`. Trusting
+        # it here means a reverse proxy that rewrites `Host` -- so that Origin
+        # and Host disagree through no fault of the caller -- does not turn every
+        # write into a 403.
+        if site == "same-origin":
+            return True
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin or origin.lower() == "null":
+            return True
+        hosts = [self.headers.get("Host") or ""]
+        forwarded = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        if forwarded:
+            hosts.append(forwarded)
+        allowed = {f"{scheme}://{host}" for host in hosts if host for scheme in ("http", "https")}
+        return origin.lower() in {value.lower() for value in allowed}
+
+    def reject_cross_site(self):
+        self.drain_body()
+        self.send_json(
+            {"error": "This request did not come from the QuickLinks interface."},
+            HTTPStatus.FORBIDDEN,
+        )
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/" and setup_required():
@@ -1516,6 +1703,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self.body_within_limit():
             return
+        if not self.same_origin_request():
+            self.reject_cross_site()
+            return
         if parsed.path == "/api/login":
             self.safe_write(self.login)
             return
@@ -1549,6 +1739,9 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        if not self.same_origin_request():
+            self.reject_cross_site()
+            return
         if not self.require_admin():
             return
         if parsed.path.startswith("/api/locations/"):
@@ -1775,13 +1968,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             validate_entra_claims(claims, config, str(flow.get("nonce", "")))
         except ValueError as error:
             LOGGER.warning("Entra sign-in could not be verified: %s", error)
-            self.entra_failed("token")
+            self.entra_failed("unverified")
             return
 
         username = entra_identity(claims)
         if not username:
             LOGGER.warning("Entra ID token carried no usable account name.")
-            self.entra_failed("token")
+            self.entra_failed("unverified")
             return
         if not entra_authorized(claims, config):
             LOGGER.warning("Entra account %r is not an allowed QuickLinks administrator.", username)
@@ -1901,6 +2094,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             "ad_domain": (body.get("domain") or "").strip(),
             "ad_admin_users": normalize_multiline(body.get("admin_users")),
             "ad_admin_groups": normalize_multiline(body.get("admin_groups")),
+            "ad_tls_verify": "1" if body.get("tls_verify", True) else "0",
+            "ad_ca_file": (body.get("ca_file") or "").strip(),
         }
         if enabled:
             if not values["ad_domain"]:
@@ -1908,6 +2103,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             domain_to_base_dn(values["ad_domain"])
             if not values["ad_admin_users"] and not values["ad_admin_groups"]:
                 raise ValueError("Add at least one AD admin user or admin group.")
+            # Reject the unencrypted combination while saving rather than leaving
+            # it to fail at the first sign-in attempt.
+            ad_tls_settings(values)
         with db() as conn:
             for key, value in values.items():
                 save_setting(conn, key, value)
@@ -1924,7 +2122,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         if not reader.fieldnames or any(field not in reader.fieldnames for field in CSV_FIELDS):
             raise ValueError("The CSV columns do not match the provided template.")
         locations, links = [], []
-        for line_number, row in enumerate(reader, start=2):
+        for line_number, raw_row in enumerate(reader, start=2):
+            row = {key: csv_plain(value) for key, value in raw_row.items()}
             record_type = (row.get("record_type") or "").strip().lower()
             if not any((value or "").strip() for value in row.values()):
                 continue
@@ -2127,14 +2326,20 @@ class AppHandler(SimpleHTTPRequestHandler):
 
             if logo_data:
                 try:
-                    header, encoded = logo_data.split(",", 1)
-                    mime_type = header.split(";", 1)[0].removeprefix("data:")
-                    extension = ALLOWED_LOGO_TYPES[mime_type]
+                    _, encoded = logo_data.split(",", 1)
                     image_bytes = base64.b64decode(encoded, validate=True)
-                except (ValueError, KeyError):
-                    raise ValueError("Choose a PNG, JPG, or WebP logo.")
+                except ValueError:
+                    raise ValueError("Choose a PNG, JPG, or WebP logo.") from None
                 if len(image_bytes) > MAX_LOGO_BYTES:
                     raise ValueError("The logo must be smaller than 5 MB.")
+                # The type is read from the bytes, not from the data URI header,
+                # so the stored extension cannot be made to disagree with the
+                # content: whatever this file turns out to be, it is served as
+                # the image type it actually is.
+                detected = logo_image_type(image_bytes)
+                if not detected:
+                    raise ValueError("That file is not a PNG, JPG, or WebP image.")
+                extension = ALLOWED_LOGO_TYPES[detected]
                 if existing:
                     (DATA_DIR / existing["value"]).unlink(missing_ok=True)
                 filename = f"branding-logo{extension}"
@@ -2250,7 +2455,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             elif "UNIQUE" in text:
                 message = "That code or value already exists."
             else:
-                message = text
+                # The raw text names tables and columns. Log it and hand back
+                # something that describes the problem without the schema.
+                LOGGER.warning(
+                    "Integrity error on %s %s: %s", self.command, redact_query(self.path), text
+                )
+                message = "That change conflicts with data that already exists."
             self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
         except sqlite3.OperationalError as error:
             LOGGER.warning("Database unavailable for %s %s: %s", self.command, self.path, error)
@@ -2280,8 +2490,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args):
-        LOGGER.info("%s - %s", self.client_ip(), format % args)
+    def log_message(self, format, *args):  # noqa: A002  (base class signature)
+        LOGGER.info("%s - %s", self.client_ip(), redact_query(format % args))
 
 
 def clean_required(value, label):
@@ -2337,6 +2547,14 @@ def csv_bool(value, line_number):
     raise ValueError(f"Row {line_number}: enabled must be 1/0, true/false, or yes/no.")
 
 
+def logo_image_type(data):
+    """Identify an uploaded logo from its own bytes, or None if unrecognised."""
+    for mime_type, matches in LOGO_SIGNATURES:
+        if matches(data):
+            return mime_type
+    return None
+
+
 def normalize_multiline(value):
     return "\n".join(split_setting_lines(value))
 
@@ -2348,7 +2566,9 @@ def main():
     )
     ensure_database()
     port = int(os.environ.get("PORT", "6969"))
-    host = os.environ.get("HOST", "0.0.0.0")
+    # Required in a container: a process bound to loopback is unreachable on the
+    # published port. Set HOST=127.0.0.1 for a bare-metal install behind a proxy.
+    host = os.environ.get("HOST", "0.0.0.0")  # noqa: S104
     LOGGER.info("QuickLinks %s listening on http://%s:%s", APP_VERSION, host, port)
     ThreadingHTTPServer((host, port), AppHandler).serve_forever()
 

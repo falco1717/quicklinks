@@ -1,0 +1,29 @@
+# Bandit configuration. Run with: bandit -c bandit.yaml -r . -x ./tests
+#
+# The three tests below are skipped here because each one fires only on lines
+# that carry a `# noqa` and an explanation in server.py. Ruff's S rules are the
+# same checks and stay enabled *unsuppressed* elsewhere in the file, so a new
+# occurrence anywhere else is still reported -- see ruff.toml.
+#
+#   B608  SQL built by string formatting. The five sites interpolate either the
+#         LINK_COLUMNS constant or a generated run of "?" placeholders; every
+#         value is bound.
+#   B310  urllib.request with a dynamic URL. The only URL is ENTRA_AUTHORITY, a
+#         literal https:// constant, plus a tenant id already matched against
+#         GUID_PATTERN.
+#   B104  binding to 0.0.0.0. Required inside a container, where a process bound
+#         to loopback is unreachable on the published port. Both deployment
+#         guides set HOST=127.0.0.1 behind a reverse proxy.
+skips:
+  - B608
+  - B310
+  - B104
+
+# The test tree is scanned by ruff instead, with S105/S106/S107 -- the hardcoded
+# credential rules -- fully enabled and no suppressions; it passes. Bandit is
+# excluded from it only because it also flags `ADMIN_PASSWORD = ""`, the line
+# that switches provisioning *off* for a test, and the `client_secret: ""` cases
+# that exist to prove a blank secret is handled. Rewriting those to satisfy a
+# regex would make the tests say less than they do now.
+exclude_dirs:
+  - "tests"

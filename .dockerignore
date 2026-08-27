@@ -1,6 +1,11 @@
 .git
 .github
 .codex
+.github-backup.json
+AGENTS.md
+ruff.toml
+bandit.yaml
+.gitleaks.toml
 .env
 example.env
 .image-extract

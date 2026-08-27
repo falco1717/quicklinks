@@ -1,0 +1,31 @@
+title = "QuickLinks secret scanning"
+
+# gitleaks' default rules look for recognisable credential formats -- AWS keys,
+# private key blocks, high-entropy tokens. They do not flag a plain literal
+# assigned to a password-shaped name, which is the pattern that dominates most
+# corporate scan reports because it also matches test fixtures. The extra rule
+# below covers that class, so the repository holds itself to the same standard
+# an external scan applies.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-secret-assignment"
+description = "A literal value assigned to a credential-shaped name"
+regex = '''(?i)\b(pass(wo?rd)?|passwd|secret|token|api[_-]?key|apikey|credential|client[_-]?secret)\b['"]?\s*[:=]\s*['"]([^'"\s{}$<][^'"]{4,})['"]'''
+tags = ["credential", "generic"]
+
+  [rules.allowlist]
+  regexTarget = "line"
+  regexes = [
+    # Generated at run time rather than written down -- the value never exists
+    # in the source. See the note at the top of tests/test_http.py.
+    '''secrets\.token_urlsafe''',
+    # Read from the environment or interpolated by the shell.
+    '''os\.environ|getenv|\$\{|\$\(''',
+    # Documentation telling a reader what to put there.
+    '''replace-with|your-|<[A-Za-z-]+>|example\.com''',
+    # Settings-table key names and JSON field names, not values.
+    '''"(entra_)?client_secret":\s*(values|current|config|body|entra)''',
+  ]

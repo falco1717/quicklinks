@@ -77,7 +77,51 @@ QuickLinks will not let you remove the last administrator — viewer accounts do
 
 Under **Admin → Authentication → Portal access**, tick **Require sign-in to view the portal** to switch off anonymous browsing entirely. The portal then shows a sign-in page instead of the catalog and nothing is public, whatever the individual departments say. Turning it on is refused when no login method exists, so you cannot lock yourself out.
 
-Directory sign-in — Active Directory or Microsoft Entra ID — currently grants administrator access, exactly as it did before departments existed. Mapping directory groups to departments is not implemented yet; assign departments to local accounts in the meantime.
+Directory sign-in — Active Directory or Microsoft Entra ID — grants administrator access.
+
+## Active Directory
+
+Users authenticate directly against Active Directory — each person binds as
+themselves, so QuickLinks needs no service account and stores no directory
+password. Open **Admin → Authentication → Active Directory**, enter your AD DNS
+domain, and list the administrators by username or by group. Leave **AD server**
+blank to discover a domain controller from the domain's `_ldap._tcp.dc._msdcs`
+SRV records.
+
+### Transport
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Use LDAPS encryption | on | Binds on port 636 over TLS instead of 389 in the clear. |
+| Verify the domain controller certificate | on | Requires the certificate to be issued by a trusted authority and to match the AD server name. |
+| CA certificate file | blank | Path to a PEM copy of the authority that issued your controller's certificate. |
+
+Encryption on its own proves only that the connection is private, not who is on
+the other end of it — without verification, anyone able to answer on the network
+can present a certificate and read the password being typed in. Verification is
+therefore on by default, and an unencrypted connection is refused while it is
+on.
+
+An enterprise certificate authority is not in the container's trust store, so
+verification against an internal AD almost always needs the CA file. Export your
+root CA as PEM, mount it, and enter the path it has **inside** the container:
+
+```yaml
+    volumes:
+      - ./data:/app/data
+      - ./enterprise-ca.pem:/app/data/enterprise-ca.pem:ro
+```
+
+then set **CA certificate file** to `/app/data/enterprise-ca.pem`. If the
+certificate cannot be verified, sign-in says so specifically rather than
+reporting a wrong password.
+
+Both settings can be turned off to accept an unverified or unencrypted
+connection, which is logged on every bind. Prefer fixing the certificate.
+
+Directory sign-in currently grants administrator access. Mapping directory
+groups to departments is not implemented yet; assign departments to local
+accounts in the meantime.
 
 ## Microsoft Entra ID
 
@@ -114,12 +158,27 @@ The client secret is stored in the settings table of `links.db`. Keep the data d
 - **The first-run page closes permanently.** It is available only while no login is possible at all. Once a local administrator exists *or* a directory (Active Directory or Microsoft Entra ID) is enabled, `POST /api/setup` is rejected, including after a restart with no local accounts left.
 - **Link URLs may not use script-bearing schemes.** `javascript:`, `data:`, `vbscript:`, `blob:`, `about:`, and `filesystem:` are rejected on both the admin form and CSV import. Ordinary schemes, intranet `host:port` forms, and `smb:`/`rdp:`/`mailto:` links are unaffected.
 - Request bodies are capped at 12 MB and rejected from the `Content-Length` header, before any of the body is read.
+- **Writes must come from this origin.** Every `POST` and `DELETE` is refused with `403` when the `Origin` header names another site, or when `Sec-Fetch-Site` says the request is cross-site. This sits behind the session cookie's `SameSite=Lax` as a second, independent check. Clients that send no `Origin` at all — `curl`, scripts — are unaffected.
+- **Directory binds verify the domain controller.** LDAPS with certificate verification is the default, and a cleartext bind is refused while verification is on. See [Active Directory](#active-directory).
+- **Uploaded logos are identified by their bytes.** The content type the browser declared is ignored, so the stored file and the type it is served as always agree.
+- **Exports are safe to open in a spreadsheet.** A value that would be read as a formula is prefixed on export and unprefixed on import, so a round trip returns the original data.
+- **Authorization codes are kept out of the log.** Query strings are redacted from request logging, so the single-use Entra code and its state value are not written to disk.
+- The full threat model, the checks that run in CI, and the risks accepted on purpose are in [SECURITY.md](SECURITY.md).
 
 ## Build and test
 
 ```bash
 python -m unittest discover -s tests -v
 docker build -t quicklinks:local .
+```
+
+The same security checks CI runs, locally:
+
+```bash
+pip install ruff bandit pip-audit
+ruff check .
+bandit -c bandit.yaml -r .
+pip-audit -r requirements.txt --strict
 ```
 
 ## Releasing

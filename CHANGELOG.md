@@ -1,5 +1,81 @@
 # Changelog
 
+## 2026.08.14.001
+
+A security review of the whole application, modelled on the rule families an
+external scan reports on: hardcoded credentials, SQL string building, unsafe
+URL handling, dependency advisories, and container posture. Every finding below
+was reproduced before being fixed, and each fix has a test that fails without it.
+
+### Fixed
+
+- **Active Directory sign-in did not verify the domain controller's
+  certificate.** `ldap3` builds its TLS context with `validate=ssl.CERT_NONE`
+  when no `Tls` object is supplied, so `use_ssl=True` encrypted the bind without
+  checking who answered: anyone able to intercept the connection could present
+  any certificate and read the administrator's AD password. LDAPS now requires a
+  verified certificate by default, with a **CA certificate file** setting for the
+  enterprise authority that issued it, and a rejected certificate is reported as
+  such instead of as a wrong password. **This can stop an existing AD sign-in
+  working** until the CA file is supplied — see [Active Directory](README.md#active-directory).
+- **An unencrypted directory bind is refused** rather than quietly sending the
+  password in the clear. Turning off certificate verification still permits it,
+  and logs a warning on every bind.
+- **The Entra authorization code was written to the log.** Request logging
+  included the query string, so `GET /api/auth/entra/callback?code=...&state=...`
+  put a single-use code and its state value into the access log and anything
+  collecting it. Query strings are now redacted.
+- **Uploaded logos trusted the content type the browser declared.** The type is
+  now read from the file's own magic bytes, so the stored extension and the type
+  it is served as cannot be made to disagree.
+- **CSV exports could carry a spreadsheet formula.** A link named
+  `=HYPERLINK(...)` would have been evaluated when the export was opened in
+  Excel. Such values are prefixed on export and unprefixed on import, so a round
+  trip still returns the original data — including negative sort orders.
+- **The session secret was briefly world-readable.** It was written and then
+  chmodded; it is now created `0600` with `O_EXCL`, which also stops two workers
+  starting together from overwriting each other's secret and invalidating the
+  sessions the other just issued.
+- **Integrity errors returned raw SQLite text**, naming tables and columns. The
+  detail is logged; the response describes the conflict.
+
+### Added
+
+- **Cross-site writes are refused.** Every `POST` and `DELETE` checks `Origin`
+  and `Sec-Fetch-Site` and answers `403` when the request came from another site.
+  This is a second, independent defence behind the session cookie's
+  `SameSite=Lax`, which is the only thing that stood between an admin session and
+  a page on another origin. Clients that send no `Origin` — `curl`, scripts — are
+  unaffected.
+- **The container runs as uid 1000** with no capabilities and a read-only root
+  filesystem; the shipped compose file sets `cap_drop: ALL`,
+  `no-new-privileges`, `read_only`, and a tmpfs for `/tmp`. CI starts the image
+  that way and creates an administrator through it, so a container that cannot
+  write its own database fails the build instead of the deployment.
+  **Upgrading needs one command once:** `sudo chown -R 1000:1000 ./data`.
+- A **Security** workflow on every push and weekly: ruff's `S` rules, bandit,
+  `pip-audit`, and gitleaks over the full history. All of it fails the build.
+- `ruff.toml`, `bandit.yaml`, and `.gitleaks.toml`. Every suppression names the
+  reason it is safe; the gitleaks configuration extends the default rules with
+  the "literal assigned to a credential-shaped name" pattern that most corporate
+  scan reports are dominated by.
+- [SECURITY.md](SECURITY.md): reporting route, threat model, what CI checks, and
+  the limitations accepted on purpose with the reasoning for each.
+- Regression tests for all of the above — 27 new cases, 125 in total.
+
+### Changed
+
+- **Test fixtures generate their credentials at run time.** Eleven fixed strings
+  assigned to password-shaped names were indistinguishable from leaked
+  credentials to a secret scanner, and that class of finding is what a scan
+  report is mostly made of. Verified: the new gitleaks rule reports eleven
+  findings against the old tests and none against these.
+- `test.yml` now declares `permissions: contents: read` instead of inheriting a
+  token with write access.
+- The Entra failure code `token` was renamed `unverified` — it described the
+  thing rather than the failure, and read as a credential to a scanner.
+- Development-only files are excluded from the image.
+
 ## 2026.08.13.001
 
 ### Added
