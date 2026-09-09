@@ -1746,5 +1746,46 @@ class CsvDepartmentTests(ServerTestCase):
         self.assertEqual(self.department_of("links", "Notices"), "general")
 
 
+class FooterVersionTests(ServerTestCase):
+    """The footer shows the running version beside the attribution."""
+
+    def setUp(self):
+        super().setUp()
+        # Without an administrator the portal redirects to first-run setup and
+        # serves no page at all, so there would be no footer to inspect.
+        self.create_admin()
+
+    def test_the_product_payload_carries_the_running_version(self):
+        payload = self.json_body(self.request("GET", "/api/product"))
+        self.assertEqual(payload["version"], server.APP_VERSION)
+        self.assertTrue(payload["version"], "a build with no version would show a blank footer")
+
+    def test_the_catalog_carries_it_too(self):
+        """The portal renders the footer from the catalog, not a second call."""
+        self.assertEqual(
+            self.json_body(self.request("GET", "/api/catalog"))["product"]["version"],
+            server.APP_VERSION,
+        )
+
+    def test_both_pages_have_somewhere_to_put_it(self):
+        """Wiring the value up is useless if the element is renamed away."""
+        for path in ("/", "/admin"):
+            body = self.request("GET", path)["body"].decode()
+            self.assertIn('id="productVersion"', body, f"{path} has no version element")
+            self.assertIn('id="productNotice"', body, f"{path} lost the attribution element")
+
+    def test_the_admin_sign_in_screen_shows_it_too(self):
+        """Signed out there is no admin payload, so the session must carry it."""
+        payload = self.json_body(self.request("GET", "/api/session"))
+        self.assertEqual(payload["product"]["version"], server.APP_VERSION)
+
+    def test_the_attribution_survives(self):
+        """The licence requires it to stay visible; the version sits beside it."""
+        for path in ("/", "/admin"):
+            body = self.request("GET", path)["body"].decode()
+            self.assertIn("Created by Jordan Farmer", body)
+        self.assertIn("Created by Jordan Farmer", server.PRODUCT_NOTICE["notice"])
+
+
 if __name__ == "__main__":
     unittest.main()

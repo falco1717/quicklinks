@@ -51,6 +51,14 @@ body {
   text-align: center;
 }
 
+/* The separator hangs off the version rather than sitting in the markup, so
+   the footer reads correctly before the API has answered and the version is
+   still empty -- no stranded dot after the attribution. */
+.app-version:not(:empty)::before {
+  content: "\00b7";
+  margin: 0 8px;
+}
+
 a {
   color: inherit;
 }

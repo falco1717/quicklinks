@@ -39,12 +39,16 @@ const elements = {
   viewTitle: document.querySelector("#viewTitle"),
   resultCount: document.querySelector("#resultCount"),
   content: document.querySelector("#content"),
-  productNotice: document.querySelector("#productNotice")
+  productNotice: document.querySelector("#productNotice"),
+  productVersion: document.querySelector("#productVersion")
 };
 
 function applyProductNotice(product = {}) {
   state.product = { ...state.product, ...product };
   elements.productNotice.textContent = state.product.notice;
+  // Read from the server rather than written into the page, so it cannot go
+  // stale against the build actually running.
+  elements.productVersion.textContent = state.product.version ? `v${state.product.version}` : "";
 }
 
 function applyBranding(branding = {}) {

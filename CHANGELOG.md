@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.09.09.002
+
+### Added
+
+- **The running version in the page footer**, beside the attribution:
+  `QuickLinks · Created by Jordan Farmer · v2026.09.09.002`. It is read from
+  the server rather than written into the markup, so it cannot go stale against
+  the build actually running, and the attribution the licence requires is
+  untouched beside it.
+- `/api/session` now carries the product block. Before sign-in no other payload
+  has loaded, so the admin footer would otherwise show the attribution with no
+  version on the sign-in and first-run screens. The version was already public
+  at `/api/product`, so nothing new is disclosed.
+
 ## 2026.09.09.001
 
 ### Added

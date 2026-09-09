@@ -1762,6 +1762,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "authenticated": self.is_admin(),
                 "setup_required": setup_required(),
                 "entra_available": entra_login_available(),
+                # Carried here so the admin footer can show the running version
+                # on the sign-in and first-run screens, where no other payload
+                # has loaded yet. Already public at /api/product.
+                "product": PRODUCT_NOTICE,
             })
             return
         if parsed.path == "/api/auth/entra/start":

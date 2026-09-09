@@ -141,7 +141,8 @@ const el = {
   localUserIsAdmin: document.querySelector("#localUserIsAdmin"),
   localUserDepartments: document.querySelector("#localUserDepartments"),
   localUserDepartmentList: document.querySelector("#localUserDepartmentList"),
-  productNotice: document.querySelector("#productNotice")
+  productNotice: document.querySelector("#productNotice"),
+  productVersion: document.querySelector("#productVersion")
 };
 
 const ENTRA_ERRORS = {
@@ -155,6 +156,9 @@ const ENTRA_ERRORS = {
 function applyProductNotice(product = {}) {
   state.product = { ...state.product, ...product };
   el.productNotice.textContent = state.product.notice;
+  // Read from the server rather than written into the page, so it cannot go
+  // stale against the build actually running.
+  el.productVersion.textContent = state.product.version ? `v${state.product.version}` : "";
 }
 
 function applyTheme(theme) {
@@ -682,6 +686,9 @@ async function refreshAdmin() {
 
 async function checkSession() {
   const payload = await api("/api/session");
+  // Before sign-in there is no admin payload, so the footer would otherwise
+  // show the attribution with no version on the login and setup screens.
+  applyProductNotice(payload.product);
   showApp(payload.authenticated, payload.setup_required);
   el.entraLogin.classList.toggle(
     "hidden",
