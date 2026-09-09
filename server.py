@@ -66,10 +66,16 @@ ALLOWED_LOGO_TYPES = {
     "image/webp": ".webp",
 }
 PASSWORD_ITERATIONS = 310_000
-CSV_FIELDS = [
+# The columns an import must contain. `department` is deliberately absent:
+# it was added later, and a file exported before it existed still has to
+# import -- refusing one would turn every old backup into a dead file.
+CSV_IMPORT_FIELDS = [
     "record_type", "name", "code", "page_type", "location_code", "link_type",
     "url", "description", "group_name", "cluster", "sort_order", "enabled",
 ]
+
+# What an export and the template are written with.
+CSV_FIELDS = [*CSV_IMPORT_FIELDS, "department"]
 
 # Only these paths are served from disk. Everything else -- source code, the
 # database, the session secret, uploaded branding -- is unreachable over HTTP.
@@ -1288,6 +1294,18 @@ def entra_authorized(claims, config):
     return False
 
 
+def csv_department(value):
+    """Normalise a department cell to a slug, or None when it is blank.
+
+    Blank is not an error: it means "leave this alone". A new record then
+    lands in the default department and an existing one keeps the department
+    it already had, so importing a file that predates this column cannot
+    silently move the whole catalogue.
+    """
+    text = (value or "").strip()
+    return department_slug(text) if text else None
+
+
 def csv_safe(value):
     """Stop a spreadsheet treating an exported value as a formula.
 
@@ -1322,17 +1340,30 @@ def csv_text(rows):
 
 
 def export_csv():
+    """The whole catalogue, including which department each record belongs to.
+
+    The department is written as its slug rather than its id, because an id is
+    meaningless in another install and a slug is what a person editing the file
+    can actually read.
+    """
     rows = []
     with db() as conn:
         for location in conn.execute(
-            "SELECT name, code, sort_order, enabled FROM locations ORDER BY name"
+            """
+            SELECT locations.name, locations.code, locations.sort_order, locations.enabled,
+                   departments.slug AS department
+            FROM locations LEFT JOIN departments ON departments.id = locations.department_id
+            ORDER BY locations.name
+            """
         ).fetchall():
             rows.append({"record_type": "location", **dict(location)})
         for link in conn.execute(
             """
-            SELECT name, page_type, location_code, link_type, url, description,
-                   group_name, cluster, sort_order, enabled
-            FROM links ORDER BY page_type, location_code, group_name, name
+            SELECT links.name, links.page_type, links.location_code, links.link_type,
+                   links.url, links.description, links.group_name, links.cluster,
+                   links.sort_order, links.enabled, departments.slug AS department
+            FROM links LEFT JOIN departments ON departments.id = links.department_id
+            ORDER BY links.page_type, links.location_code, links.group_name, links.name
             """
         ).fetchall():
             rows.append({"record_type": "link", **dict(link)})
@@ -1340,24 +1371,50 @@ def export_csv():
 
 
 def template_csv():
-    return csv_text([
+    """A scaffold to fill in, using department slugs that exist on this install.
+
+    The examples name real departments rather than invented ones, so the file
+    imports as it stands. A template carrying a slug from somebody else's
+    install would fail on the first attempt, which is a poor introduction to a
+    feature.
+    """
+    with db() as conn:
+        slugs = [
+            row["slug"] for row in conn.execute(
+                "SELECT slug FROM departments WHERE enabled = 1 ORDER BY sort_order, id"
+            ).fetchall()
+        ]
+    primary = slugs[0] if slugs else "general"
+    rows = [
         {
             "record_type": "location", "name": "Example Facility", "code": "ex",
-            "sort_order": 10, "enabled": 1,
+            "sort_order": 10, "enabled": 1, "department": primary,
         },
         {
+            # Left blank on purpose: a link on a location page always belongs to
+            # whatever department its location does, so this column is ignored
+            # here and the value is inherited.
             "record_type": "link", "name": "Example Service", "page_type": "location",
             "location_code": "ex", "link_type": "standard", "url": "https://service.example.com",
             "description": "Short description shown on the card.", "group_name": "Standard Services",
-            "cluster": "", "sort_order": 10, "enabled": 1,
+            "cluster": "", "sort_order": 10, "enabled": 1, "department": "",
         },
         {
             "record_type": "link", "name": "Example General Link", "page_type": "general",
             "location_code": "", "link_type": "general", "url": "https://portal.example.com",
             "description": "Short description shown on the card.", "group_name": "Operations",
-            "cluster": "", "sort_order": 20, "enabled": 1,
+            "cluster": "", "sort_order": 20, "enabled": 1, "department": primary,
         },
-    ])
+    ]
+    if len(slugs) > 1:
+        rows.append({
+            "record_type": "link", "name": "Example Departmental Link", "page_type": "general",
+            "location_code": "", "link_type": "general", "url": "https://intranet.example.com",
+            "description": "Only the departments assigned to it will see this card.",
+            "group_name": "Operations", "cluster": "", "sort_order": 30, "enabled": 1,
+            "department": slugs[1],
+        })
+    return csv_text(rows)
 
 
 def sign_session(source, username, issued, expires):
@@ -2138,7 +2195,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if len(raw_csv.encode()) > MAX_CSV_BYTES:
             raise ValueError("CSV files must be smaller than 5 MB.")
         reader = csv.DictReader(io.StringIO(raw_csv.lstrip(chr(0xFEFF))))
-        if not reader.fieldnames or any(field not in reader.fieldnames for field in CSV_FIELDS):
+        if not reader.fieldnames or any(
+            field not in reader.fieldnames for field in CSV_IMPORT_FIELDS
+        ):
             raise ValueError("The CSV columns do not match the provided template.")
         locations, links = [], []
         for line_number, raw_row in enumerate(reader, start=2):
@@ -2152,6 +2211,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "code": clean_required(row.get("code"), f"Location code on row {line_number}").lower(),
                     "sort_order": clean_int(row.get("sort_order"), 0),
                     "enabled": csv_bool(row.get("enabled"), line_number),
+                    "department": csv_department(row.get("department")),
                 })
             elif record_type == "link":
                 page_type = (row.get("page_type") or "").strip().lower()
@@ -2173,6 +2233,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "cluster": (row.get("cluster") or "").strip(),
                     "sort_order": clean_int(row.get("sort_order"), 0),
                     "enabled": csv_bool(row.get("enabled"), line_number),
+                    # Ignored for a location link, which inherits from its
+                    # location. Kept so the value can be reported rather than
+                    # silently dropped if the two ever disagree.
+                    "department": csv_department(row.get("department")),
                 })
             else:
                 raise ValueError(f"Row {line_number}: record_type must be location or link.")
@@ -2180,6 +2244,21 @@ class AppHandler(SimpleHTTPRequestHandler):
         available_codes = {location["code"] for location in locations}
         with db() as conn:
             import_department = default_department_id(conn)
+            # Resolve every named department before writing anything, so a typo
+            # on the last row does not leave a half-applied import behind.
+            known_departments = {
+                row["slug"]: row["id"]
+                for row in conn.execute("SELECT id, slug FROM departments").fetchall()
+            }
+            unknown = sorted({
+                record["department"] for record in (*locations, *links)
+                if record["department"] and record["department"] not in known_departments
+            })
+            if unknown:
+                raise ValueError(
+                    f"Unknown department(s): {', '.join(unknown)}. Create them under "
+                    f"Departments first, or use one of: {', '.join(sorted(known_departments))}."
+                )
             if mode == "merge":
                 available_codes.update(
                     row["code"] for row in conn.execute("SELECT code FROM locations").fetchall()
@@ -2197,10 +2276,17 @@ class AppHandler(SimpleHTTPRequestHandler):
                 conn.execute(
                     """
                     INSERT INTO locations(name, code, sort_order, enabled, department_id)
-                    VALUES(:name, :code, :sort_order, :enabled, :department_id)
-                    ON CONFLICT(code) DO UPDATE SET name=excluded.name, sort_order=excluded.sort_order, enabled=excluded.enabled
+                    VALUES(:name, :code, :sort_order, :enabled,
+                           COALESCE(:department_id, :fallback_department))
+                    ON CONFLICT(code) DO UPDATE SET
+                      name=excluded.name, sort_order=excluded.sort_order, enabled=excluded.enabled,
+                      department_id=COALESCE(:department_id, locations.department_id)
                     """,
-                    {**location, "department_id": import_department},
+                    {
+                        **location,
+                        "department_id": known_departments.get(location["department"]),
+                        "fallback_department": import_department,
+                    },
                 )
             for link in links:
                 existing = conn.execute(
@@ -2213,10 +2299,16 @@ class AppHandler(SimpleHTTPRequestHandler):
                     conn.execute(
                         """
                         UPDATE links SET link_type=:link_type, url=:url, description=:description,
-                          group_name=:group_name, cluster=:cluster, sort_order=:sort_order, enabled=:enabled
+                          group_name=:group_name, cluster=:cluster, sort_order=:sort_order,
+                          enabled=:enabled,
+                          department_id=COALESCE(:department_id, links.department_id)
                         WHERE id=:id
                         """,
-                        {**link, "id": existing["id"]},
+                        {
+                            **link,
+                            "id": existing["id"],
+                            "department_id": known_departments.get(link["department"]),
+                        },
                     )
                 else:
                     conn.execute(
@@ -2224,10 +2316,29 @@ class AppHandler(SimpleHTTPRequestHandler):
                         INSERT INTO links(page_type, location_code, link_type, name, url, description,
                           group_name, cluster, sort_order, enabled, department_id)
                         VALUES(:page_type, :location_code, :link_type, :name, :url, :description,
-                          :group_name, :cluster, :sort_order, :enabled, :department_id)
+                          :group_name, :cluster, :sort_order, :enabled,
+                          COALESCE(:department_id, :fallback_department))
                         """,
-                        {**link, "department_id": import_department},
+                        {
+                            **link,
+                            "department_id": known_departments.get(link["department"]),
+                            "fallback_department": import_department,
+                        },
                     )
+            # A link on a location page belongs to whatever department its
+            # location does. Reconciling once at the end covers links whose
+            # location moved in this same import, which a per-row lookup would
+            # miss depending on row order.
+            conn.execute(
+                """
+                UPDATE links
+                SET department_id = (
+                    SELECT department_id FROM locations WHERE locations.code = links.location_code
+                )
+                WHERE page_type = 'location' AND location_code IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM locations WHERE locations.code = links.location_code)
+                """
+            )
         self.send_json({
             **admin_payload(),
             "imported": {"locations": len(locations), "links": len(links), "mode": mode},

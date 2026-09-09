@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026.09.09.001
+
+### Added
+
+- **A `department` column in CSV import and export.** The export now records
+  which department each location and link belongs to, and an import can set it.
+  The column takes a department's **slug** rather than its numeric id, because
+  an id means nothing in another install and a slug is what a person editing the
+  file can read. Case and spacing are normalised the way the admin form does, so
+  `IT` and `it` are the same department.
+- The downloadable template is now generated for the install requesting it and
+  uses departments that actually exist there, so it imports as it stands. A
+  template carrying a slug from somebody else's install would fail on the first
+  attempt, which is a poor introduction to a feature.
+
+### Changed
+
+- **A blank department cell means "leave this alone", not "move to the
+  default".** A new record lands in the default department; an existing one
+  keeps the department it already had. This is what lets a file exported before
+  the column existed still import without sweeping a departmented catalogue back
+  into one department.
+- The column is **optional on import**. Only the original twelve are required,
+  so every previously exported file remains valid.
+- Merging now updates the department of an existing record when the cell names
+  one. Previously the department of an existing row was never touched by an
+  import.
+- **A link on a location page inherits its location's department** and its own
+  cell is ignored, matching the admin form, which already ignores a submitted
+  department for such a link. Inheritance is reconciled once at the end of an
+  import, so a link whose location moved in that same import moves with it
+  regardless of row order.
+- An unrecognised slug stops the import before anything is written and lists the
+  slugs that do exist, rather than half-applying the file.
+
 ## 2026.08.14.001
 
 A security review of the whole application, modelled on the rule families an

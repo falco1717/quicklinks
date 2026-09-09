@@ -1554,5 +1554,197 @@ class AdTransportSettingsTests(ServerTestCase):
         self.assertEqual(ad["ca_file"], "/app/data/ca.pem")
 
 
+class CsvDepartmentTests(ServerTestCase):
+    """The department column: export, template, and every import path."""
+
+    # Twelve columns, as exported before the department column existed.
+    LEGACY_HEADER = ",".join(server.CSV_IMPORT_FIELDS)
+    HEADER = ",".join(server.CSV_FIELDS)
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.create_admin()
+        response = self.request(
+            "POST", "/api/departments", {"name": "IT", "public": False, "sort_order": 20},
+            token=self.admin,
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.departments = {d["slug"]: d["id"] for d in self.json_body(response)["departments"]}
+
+    # -- helpers ----------------------------------------------------------
+
+    def import_csv(self, rows, mode="merge", header=None):
+        body = "\r\n".join([header or self.HEADER, *rows])
+        return self.request("POST", "/api/import", {"csv": body, "mode": mode}, token=self.admin)
+
+    def admin_payload(self):
+        return self.json_body(self.request("GET", "/api/admin", token=self.admin))
+
+    def department_of(self, kind, name):
+        payload = self.admin_payload()
+        by_id = {d["id"]: d["slug"] for d in payload["departments"]}
+        for row in payload[kind]:
+            if row["name"] == name:
+                return by_id.get(row["department_id"])
+        raise AssertionError(f"no {kind} named {name!r}")
+
+    def export_rows(self):
+        response = self.request("GET", "/api/export.csv", token=self.admin)
+        self.assertEqual(response["status"], 200, response["body"])
+        return list(csv.DictReader(io.StringIO(response["body"].decode("utf-8-sig"))))
+
+    # -- export and template ----------------------------------------------
+
+    def test_export_names_the_department_as_a_slug(self):
+        """An id means nothing in another install; a slug is readable."""
+        self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,it",
+            "link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it",
+        ])
+        rows = {r["name"]: r for r in self.export_rows()}
+        self.assertEqual(rows["Server Room"]["department"], "it")
+        self.assertEqual(rows["Helpdesk"]["department"], "it")
+
+    def test_template_has_the_column_and_only_real_departments(self):
+        """A template naming a department that does not exist would not import."""
+        response = self.request("GET", "/api/import-template.csv", token=self.admin)
+        self.assertEqual(response["status"], 200)
+        text = response["body"].decode("utf-8-sig")
+        rows = list(csv.DictReader(io.StringIO(text)))
+        self.assertIn("department", rows[0])
+        real = {d["slug"] for d in self.admin_payload()["departments"]}
+        used = {r["department"] for r in rows if r["department"]}
+        self.assertTrue(used, "the template should demonstrate the column")
+        self.assertTrue(used <= real, f"template names departments that do not exist: {used - real}")
+
+    def test_the_template_imports_as_it_stands(self):
+        """The whole point of a template is that it works before you edit it."""
+        response = self.request("GET", "/api/import-template.csv", token=self.admin)
+        text = response["body"].decode("utf-8-sig")
+        imported = self.request(
+            "POST", "/api/import", {"csv": text, "mode": "merge"}, token=self.admin
+        )
+        self.assertEqual(imported["status"], 200, imported["body"])
+
+    # -- import: assigning a department -----------------------------------
+
+    def test_a_named_department_is_applied(self):
+        response = self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,it",
+            "link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it",
+        ])
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Server Room"), "it")
+        self.assertEqual(self.department_of("links", "Helpdesk"), "it")
+
+    def test_the_slug_is_normalised_like_the_admin_form(self):
+        """`IT` and `it` are the same department; a CSV should not care."""
+        response = self.import_csv(["location,Server Room,sr,,,,,,,,10,1,IT"])
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Server Room"), "it")
+
+    def test_blank_department_uses_the_default(self):
+        response = self.import_csv(["location,Front Desk,fd,,,,,,,,10,1,"])
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Front Desk"), "general")
+
+    def test_an_unknown_department_is_refused_and_names_the_valid_ones(self):
+        response = self.import_csv(["location,Server Room,sr,,,,,,,,10,1,nope"])
+        self.assertEqual(response["status"], 400)
+        error = self.json_body(response)["error"]
+        self.assertIn("nope", error)
+        self.assertIn("general", error)
+        self.assertIn("it", error)
+        # Nothing was written -- a typo on one row must not half-apply an import.
+        self.assertEqual(self.admin_payload()["locations"], [])
+
+    # -- import: inheritance ----------------------------------------------
+
+    def test_a_location_link_inherits_and_ignores_its_own_column(self):
+        """Matches the admin form, which also ignores a submitted department."""
+        response = self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,it",
+            "link,Rack Map,,location,sr,standard,https://rack.example.com,,Std,,10,1,general",
+        ])
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("links", "Rack Map"), "it")
+
+    def test_moving_a_location_moves_its_links(self):
+        """The reconciliation has to survive the location moving mid-import."""
+        self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,general",
+            "link,Rack Map,,location,sr,standard,https://rack.example.com,,Std,,10,1,",
+        ])
+        self.assertEqual(self.department_of("links", "Rack Map"), "general")
+        response = self.import_csv(["location,Server Room,sr,,,,,,,,10,1,it"])
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Server Room"), "it")
+        self.assertEqual(self.department_of("links", "Rack Map"), "it")
+
+    # -- import: not losing what is already there --------------------------
+
+    def test_a_file_without_the_column_still_imports(self):
+        """Every backup taken before this column existed has twelve fields."""
+        response = self.import_csv(
+            ["location,Front Desk,fd,,,,,,,,10,1"], header=self.LEGACY_HEADER
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Front Desk"), "general")
+
+    def test_a_legacy_file_does_not_move_existing_records(self):
+        """The regression that would matter: re-importing an old backup must
+        not sweep a departmented catalogue back into the default."""
+        self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,it",
+            "link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it",
+        ])
+        response = self.import_csv(
+            [
+                "location,Server Room,sr,,,,,,,,20,1",
+                "link,Helpdesk,,general,,general,https://help.example.com,,Ops,,20,1",
+            ],
+            header=self.LEGACY_HEADER,
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Server Room"), "it")
+        self.assertEqual(self.department_of("links", "Helpdesk"), "it")
+
+    def test_a_blank_cell_leaves_an_existing_record_alone(self):
+        self.import_csv(["link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it"])
+        response = self.import_csv(
+            ["link,Helpdesk,,general,,general,https://help.example.com,,Ops,,20,1,"]
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("links", "Helpdesk"), "it")
+
+    def test_merge_moves_a_record_when_a_department_is_named(self):
+        self.import_csv(["link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it"])
+        response = self.import_csv(
+            ["link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,general"]
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("links", "Helpdesk"), "general")
+
+    # -- round trip --------------------------------------------------------
+
+    def test_export_then_import_preserves_departments(self):
+        """The export is the backup path, so it has to restore what it saved."""
+        self.import_csv([
+            "location,Server Room,sr,,,,,,,,10,1,it",
+            "link,Rack Map,,location,sr,standard,https://rack.example.com,,Std,,10,1,",
+            "link,Helpdesk,,general,,general,https://help.example.com,,Ops,,10,1,it",
+            "link,Notices,,general,,general,https://notice.example.com,,Ops,,20,1,general",
+        ])
+        exported = self.request("GET", "/api/export.csv", token=self.admin)["body"].decode("utf-8-sig")
+        response = self.request(
+            "POST", "/api/import", {"csv": exported, "mode": "replace"}, token=self.admin
+        )
+        self.assertEqual(response["status"], 200, response["body"])
+        self.assertEqual(self.department_of("locations", "Server Room"), "it")
+        self.assertEqual(self.department_of("links", "Rack Map"), "it")
+        self.assertEqual(self.department_of("links", "Helpdesk"), "it")
+        self.assertEqual(self.department_of("links", "Notices"), "general")
+
+
 if __name__ == "__main__":
     unittest.main()

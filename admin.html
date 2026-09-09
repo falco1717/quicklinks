@@ -332,6 +332,7 @@
                     </select>
                   </label>
                   <p class="field-help">Merge matches locations by code and links by page, location, and name. Replace removes the existing catalog first.</p>
+                  <p class="field-help">The <code>department</code> column takes a department&rsquo;s slug, such as <code>general</code>. Leave it blank to put a new record in the default department and to leave an existing one where it is &mdash; so a file exported before this column existed still imports unchanged. A link on a location page always follows its location, so its own value is ignored. An unrecognised slug stops the import and lists the ones that exist.</p>
                   <button id="importButton" class="primary-button" type="button">Import CSV</button>
                   <p id="importResult" class="result-count"></p>
                 </section>

@@ -79,6 +79,46 @@ Under **Admin → Authentication → Portal access**, tick **Require sign-in to 
 
 Directory sign-in — Active Directory or Microsoft Entra ID — grants administrator access.
 
+## CSV import and export
+
+**Admin &rarr; Data** exports the whole catalogue and imports it back. The export is
+also the backup path, so it restores exactly what it saved.
+
+Columns are `record_type`, `name`, `code`, `page_type`, `location_code`,
+`link_type`, `url`, `description`, `group_name`, `cluster`, `sort_order`,
+`enabled`, `department`.
+
+### The department column
+
+It takes a department's **slug** &mdash; `general`, `it`, `facilities-team` &mdash; not its
+numeric id, because an id means nothing in another install. Case and spacing are
+normalised the same way the admin form does, so `IT` and `it` are the same
+department.
+
+| Cell | Effect |
+| --- | --- |
+| A slug that exists | The record goes to that department. |
+| Blank | A new record goes to the default department; an existing one stays where it is. |
+| Missing column | Same as blank, for every row. A file exported before this column existed still imports. |
+| A slug that does not exist | The import stops before writing anything and lists the slugs that do exist. |
+
+Two behaviours worth knowing:
+
+- **A link on a location page inherits its location's department**, and its own
+  `department` cell is ignored. The two can never disagree, which is the same
+  rule the admin form enforces. Moving a location in an import moves its links
+  with it.
+- **Blank means "leave alone", not "move to default".** Re-importing an old
+  backup therefore cannot sweep a departmented catalogue back into one
+  department.
+
+Departments themselves are created under **Admin &rarr; Departments**; an import
+assigns records to existing departments rather than creating new ones, so a typo
+is caught instead of quietly fragmenting the catalogue.
+
+Download the template from **Admin &rarr; Data**. It is generated for your install
+and uses departments you actually have, so it imports as it stands.
+
 ## Active Directory
 
 Users authenticate directly against Active Directory — each person binds as
